@@ -2,6 +2,7 @@ package pps
 
 import (
 	"fmt"
+	"log"
 	"time"
 
 	"ts2phc-go/phc"
@@ -17,16 +18,20 @@ const (
 )
 
 type Sink struct {
-	Name        string
-	Device      *phc.Device
-	Channel     uint32
-	Polarity    uint32
+	Name     string
+	Device   *phc.Device
+	Channel  uint32
+	Polarity uint32
 
 	// Dynamic Edge Filtering State
 	state       FilterState
 	lastEvent   time.Time
 	pulseWidth  time.Duration
 	pulsePeriod time.Duration
+
+	// Last validated EXTTS hardware timestamp
+	LastValidTS time.Time
+	IsAvailable bool
 
 	// Servo state
 	Servo servo.Servo
@@ -44,7 +49,12 @@ func NewSink(name string, chanIdx uint32, polarity uint32) (*Sink, error) {
 		return nil, fmt.Errorf("failed to get caps: %v", err)
 	}
 
-	s := servo.NewPiServo(0, float64(caps.MaxAdj), 1.0)
+	fadj, err := dev.GetFreq()
+	if err != nil {
+		fadj = 0
+	}
+
+	s := servo.NewPiServo(-fadj, float64(caps.MaxAdj), servo.DefaultPiServoConfig())
 
 	return &Sink{
 		Name:        name,
@@ -58,7 +68,38 @@ func NewSink(name string, chanIdx uint32, polarity uint32) (*Sink, error) {
 }
 
 func (s *Sink) Arm() error {
-	return s.Device.RequestExtts(s.Channel, s.Polarity)
+	// Disable, isolate channel mask, drain stale events, then re-arm.
+	// Matches linuxptp ts2phc_pps_sink_create() init sequence.
+	s.Device.DisableExtts(s.Channel)
+
+	if err := s.Device.ClearExttsMask(); err == nil {
+		s.Device.EnableExttsMaskSingle(s.Channel)
+	}
+
+	if err := s.Device.DrainExtts(); err != nil {
+		return fmt.Errorf("drain extts fifo: %w", err)
+	}
+
+	err := s.Device.RequestExtts(s.Channel, s.Polarity)
+	if err == nil {
+		return nil
+	}
+
+	err2 := s.Device.RequestExtts(s.Channel, phc.PTP_RISING_EDGE)
+	if err2 == nil {
+		fmt.Printf("[%s] both-edge EXTTS failed, armed rising-edge only\n", s.Name)
+		s.Polarity = phc.PTP_RISING_EDGE
+		return nil
+	}
+
+	err3 := s.Device.RequestExtts(s.Channel, phc.PTP_FALLING_EDGE)
+	if err3 == nil {
+		fmt.Printf("[%s] rising-edge EXTTS failed, armed falling-edge only\n", s.Name)
+		s.Polarity = phc.PTP_FALLING_EDGE
+		return nil
+	}
+
+	return fmt.Errorf("all EXTTS arm attempts failed (both: %v, rising: %v, falling: %v)", err, err2, err3)
 }
 
 func (s *Sink) Destroy() {
@@ -66,14 +107,11 @@ func (s *Sink) Destroy() {
 	s.Device.Close()
 }
 
-// Returns the true 1PPS edge and a boolean indicating if it's a valid edge to sync against.
+// ProcessEvent runs the dynamic edge filter on every event.
+// The filter always runs because some cards deliver both edges regardless
+// of the polarity requested in the EXTTS request.
 func (s *Sink) ProcessEvent(event phc.ExttsEvent, forceIgnore bool) (time.Time, bool) {
 	now := time.Unix(event.Time.Sec, int64(event.Time.NSec))
-
-	if s.Polarity != (phc.PTP_RISING_EDGE|phc.PTP_FALLING_EDGE) {
-		// Hardware filters edges for us. Trust all incoming events.
-		return now, !forceIgnore
-	}
 
 	if forceIgnore {
 		s.lastEvent = now
@@ -90,7 +128,7 @@ func (s *Sink) ProcessEvent(event phc.ExttsEvent, forceIgnore bool) (time.Time, 
 	s.lastEvent = now
 
 	// We assume a 1PPS signal (1s period) and that the pulse width is < 0.5s.
-	// Therefore, the sequence of deltas will look like: 
+	// Therefore, the sequence of deltas will look like:
 	// [PulseWidth], [1s - PulseWidth], [PulseWidth], [1s - PulseWidth]...
 
 	isShortEdge := delta < (s.pulsePeriod / 2)
@@ -103,11 +141,11 @@ func (s *Sink) ProcessEvent(event phc.ExttsEvent, forceIgnore bool) (time.Time, 
 			// We can lock onto the PATTERN now: the TRUE edge is followed immediately by a short delta.
 			// By definition, the edge that *caused* this short delta is the UNWANTED trailing edge of the pulse.
 			s.state = FilterStateLocked
-			// fmt.Printf("[%s] Locked dynamic edge. Pulse width: %v\n", s.Name, s.pulseWidth)
+			log.Printf("[%s] edge filter locked, pulse width %v", s.Name, s.pulseWidth)
 			return now, false
 		} else {
 			// This was the long gap between pulses. The current edge 'now' is the true start
-			// of the next pulse (the true 1s marker), but we need to see the short gap to be sure 
+			// of the next pulse (the true 1s marker), but we need to see the short gap to be sure
 			// we are locked onto the correct phase.
 		}
 		return now, false
@@ -125,8 +163,8 @@ func (s *Sink) ProcessEvent(event phc.ExttsEvent, forceIgnore bool) (time.Time, 
 		// Calculate the jitter/drift against the expected period (1 second - pulseWidth)
 		expectedDelta := s.pulsePeriod - s.pulseWidth
 		drift := delta - expectedDelta
-		
-		// If the drift is massive relative to the expected 1s period, we lost lock 
+
+		// If the drift is massive relative to the expected 1s period, we lost lock
 		// (e.g., missed an interrupt, cable disconnected).
 		if drift > 100*time.Millisecond || drift < -100*time.Millisecond {
 			// fmt.Printf("[%s] Lost lock. Re-initializing filter.\n", s.Name)

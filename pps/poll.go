@@ -7,8 +7,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// PollSinks multiplexes read events from all configured PHC sinks. 
-// It guarantees that all sinks have reported an event for the given cycle 
+// PollSinks multiplexes read events from all configured PHC sinks.
+// It guarantees that all sinks have reported an event for the given cycle
 // before allowing the main loop to proceed and synchronize everything
 // against the reference clock's source timestamp.
 func PollSinks(sinks []*Sink, timeout time.Duration) (bool, error) {
@@ -50,19 +50,24 @@ func PollSinks(sinks []*Sink, timeout time.Duration) (bool, error) {
 
 			if pollFds[i].Revents&(unix.POLLIN|unix.POLLPRI) != 0 {
 				s := sinks[i]
-				
-				// Read the raw event
+
 				event, err := s.Device.ReadExttsEvent()
 				if err != nil {
 					return false, fmt.Errorf("read extts failed on sink %s: %w", s.Name, err)
 				}
-				
-				// Apply dynamic edge filter
-				// The boolean returned indicates if the event is a TRUE 1PPS edge and should be processed
-				_, validEdge := s.ProcessEvent(event, false)
+
+				if event.Index != s.Channel {
+					continue
+				}
+
+				ts, validEdge := s.ProcessEvent(event, false)
 
 				if !validEdge {
 					ignoreAny = true
+				} else {
+					// Store the validated hardware timestamp for the main loop
+					s.LastValidTS = ts
+					s.IsAvailable = true
 				}
 
 				// We collect the event anyway (even if ignored) because we do not want
