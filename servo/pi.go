@@ -1,3 +1,15 @@
+// Package servo implements a PI clock servo.
+//
+// This file is a Go port of the PI clock servo used by the Linux PTP
+// project's ts2phc utility (linuxptp), and is therefore a derivative work.
+// It is based on the original implementation by:
+//
+//   Linux PTP project (linuxptp),
+// Copyright (C) 2011 Richard Cochran.
+//
+// This file is licensed under the terms of the GNU General Public License,
+// version 2 or (at your option) any later version (GPL-2.0-or-later).
+//
 package servo
 
 import (
