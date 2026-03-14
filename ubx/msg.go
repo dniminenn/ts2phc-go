@@ -5,7 +5,11 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 )
+
+// GPS epoch: January 6, 1980 00:00:00 UTC.
+var gpsEpoch = time.Date(1980, 1, 6, 0, 0, 0, 0, time.UTC)
 
 // Message class/ID constants.
 const (
@@ -288,6 +292,25 @@ func ParseTimTP(payload []byte) (*TimTP, error) {
 		Flags:    payload[14],
 		RefInfo:  payload[15],
 	}, nil
+}
+
+func (t *TimTP) TimeBaseUTC() bool  { return t.Flags&0x01 != 0 }
+func (t *TimTP) UTCAvailable() bool { return t.Flags&0x02 != 0 }
+func (t *TimTP) RAIM() uint8        { return (t.Flags >> 2) & 0x03 }
+func (t *TimTP) QErrInvalid() bool  { return t.Flags&0x10 != 0 }
+func (t *TimTP) TpNotLocked() bool  { return t.Flags&0x20 != 0 }
+
+// ToTAI converts week+tow to a TAI time.Time.
+// When the timebase is GNSS (GPS), TAI = GPS + 19s (fixed forever).
+// When the timebase is UTC, TAI = UTC + utcTAIOffset.
+func (t *TimTP) ToTAI(utcTAIOffsetSec int) time.Time {
+	weekDur := time.Duration(t.Week) * 7 * 24 * time.Hour
+	towDur := time.Duration(t.TowMS) * time.Millisecond
+	base := gpsEpoch.Add(weekDur + towDur)
+	if t.TimeBaseUTC() {
+		return base.Add(time.Duration(utcTAIOffsetSec) * time.Second)
+	}
+	return base.Add(19 * time.Second) // GPS + 19s = TAI, always
 }
 
 // MonVer is UBX-MON-VER (0x0a 0x04), variable length.

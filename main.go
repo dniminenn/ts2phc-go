@@ -384,11 +384,6 @@ func (h *handler) OnUBX(frame ubx.Frame) {
 			log.Printf("parse NAV-PVT: %v", err)
 			return
 		}
-
-		utc := time.Date(int(pvt.Year), time.Month(pvt.Month), int(pvt.Day),
-			int(pvt.Hour), int(pvt.Min), int(pvt.Sec), int(pvt.Nano), time.UTC)
-		h.source.SetTime(utc, pvt.GnssFixOK())
-
 		if h.metrics != nil {
 			h.metrics.UpdateNavPVT(pvt)
 		}
@@ -443,6 +438,7 @@ func (h *handler) OnUBX(frame ubx.Frame) {
 			log.Printf("parse TIM-TP: %v", err)
 			return
 		}
+		h.source.SetTimTP(tp)
 		if h.metrics != nil {
 			h.metrics.UpdateTimTP(tp)
 		}

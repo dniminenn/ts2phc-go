@@ -2,58 +2,69 @@ package pps
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
 	"ts2phc-go/phc"
+	"ts2phc-go/ubx"
 )
 
-const maxPVTAge = 5 * time.Second
+const maxTPAge = 2 * time.Second
 
-// UBXSource implements Source using UTC time from UBX NAV-PVT messages.
-// The demux handler calls SetTime on each NavPVT; GetPPSTime returns the
-// extrapolated UTC+TAI time for the PPS discipline loop.
+// UBXSource implements Source using UBX-TIM-TP messages.
+// TIM-TP gives the exact TAI second of the next timepulse, directly
+// coupled to the PPS output pin. It is present whenever PPS is active.
 type UBXSource struct {
 	mu        sync.Mutex
-	rxTime    time.Time // time.Now() when PVT was received
-	utcTime   time.Time // UTC from NavPVT
-	fixValid  bool
-	taiOffset time.Duration
+	tpTAI     time.Time // TAI second of the timepulse
+	tpRxTime  time.Time // time.Now() when TIM-TP was received
+	tpValid   bool
+	taiOffset int // TAI-UTC seconds (for UTC timebase)
 }
 
 func NewUBXSource(taiOffsetSec int) *UBXSource {
 	return &UBXSource{
-		taiOffset: time.Duration(taiOffsetSec) * time.Second,
+		taiOffset: taiOffsetSec,
 	}
 }
 
-// SetTime is called by the demux handler when a NavPVT with a valid fix arrives.
-func (s *UBXSource) SetTime(utc time.Time, fixOK bool) {
+// SetTimTP is called by the demux handler on each TIM-TP message.
+func (s *UBXSource) SetTimTP(tp *ubx.TimTP) {
+	locked := !tp.TpNotLocked()
+
 	s.mu.Lock()
-	s.rxTime = time.Now()
-	s.utcTime = utc
-	s.fixValid = fixOK
+	wasValid := s.tpValid
+	if locked {
+		s.tpTAI = tp.ToTAI(s.taiOffset)
+		s.tpRxTime = time.Now()
+		s.tpValid = true
+	} else {
+		s.tpValid = false
+	}
 	s.mu.Unlock()
+
+	if locked && !wasValid {
+		log.Printf("tim-tp: timepulse locked to GNSS")
+	} else if !locked && wasValid {
+		log.Printf("tim-tp: timepulse NOT locked (holdover/local)")
+	}
 }
 
 func (s *UBXSource) GetPPSTime() (time.Time, error) {
 	s.mu.Lock()
-	rx := s.rxTime
-	utc := s.utcTime
-	valid := s.fixValid
+	tai := s.tpTAI
+	rx := s.tpRxTime
+	valid := s.tpValid
 	s.mu.Unlock()
 
-	if rx.IsZero() {
-		return time.Time{}, fmt.Errorf("ubx: no PVT received yet")
-	}
 	if !valid {
-		return time.Time{}, fmt.Errorf("ubx: no valid fix")
+		return time.Time{}, fmt.Errorf("tim-tp: no message received yet")
 	}
-	elapsed := time.Since(rx)
-	if elapsed > maxPVTAge {
-		return time.Time{}, fmt.Errorf("ubx: PVT stale (%v)", elapsed)
+	if elapsed := time.Since(rx); elapsed > maxTPAge {
+		return time.Time{}, fmt.Errorf("tim-tp: stale (%v)", elapsed)
 	}
-	return utc.Add(elapsed).Add(s.taiOffset), nil
+	return tai, nil
 }
 
 func (s *UBXSource) GetClock() *phc.Device { return nil }
