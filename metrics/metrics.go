@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"ts2phc-go/ubx"
@@ -58,39 +59,39 @@ func New(reg prometheus.Registerer) *Metrics {
 	ns := "gps"
 	svLabels := []string{"gnss", "svid"}
 
-	m.fixType   = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "fix_type", Help: "GNSS fix type (0=none,2=2D,3=3D)"})
-	m.numSV     = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "satellites_used", Help: "Number of SVs used in nav solution"})
-	m.lat       = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "latitude_degrees"})
-	m.lon       = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "longitude_degrees"})
-	m.altMSL    = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "altitude_msl_meters"})
-	m.hAcc      = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "horizontal_accuracy_meters"})
-	m.vAcc      = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "vertical_accuracy_meters"})
-	m.speed     = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "speed_mps", Help: "Ground speed in m/s"})
-	m.heading   = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "heading_degrees", Help: "Vehicle heading in degrees"})
-	m.headAcc   = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "heading_accuracy_degrees"})
-	m.velN      = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "velocity_north_mps"})
-	m.velE      = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "velocity_east_mps"})
-	m.velD      = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "velocity_down_mps"})
-	m.pdop      = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "pdop"})
-	m.hdop      = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "hdop"})
-	m.vdop      = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "vdop"})
-	m.tdop      = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "tdop"})
-	m.gdop      = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "gdop"})
-	m.timeAcc   = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "time_accuracy_ns"})
+	m.fixType = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "fix_type", Help: "GNSS fix type (0=none,2=2D,3=3D)"})
+	m.numSV = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "satellites_used", Help: "Number of SVs used in nav solution"})
+	m.lat = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "latitude_degrees"})
+	m.lon = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "longitude_degrees"})
+	m.altMSL = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "altitude_msl_meters"})
+	m.hAcc = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "horizontal_accuracy_meters"})
+	m.vAcc = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "vertical_accuracy_meters"})
+	m.speed = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "speed_mps", Help: "Ground speed in m/s"})
+	m.heading = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "heading_degrees", Help: "Vehicle heading in degrees"})
+	m.headAcc = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "heading_accuracy_degrees"})
+	m.velN = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "velocity_north_mps"})
+	m.velE = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "velocity_east_mps"})
+	m.velD = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "velocity_down_mps"})
+	m.pdop = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "pdop"})
+	m.hdop = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "hdop"})
+	m.vdop = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "vdop"})
+	m.tdop = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "tdop"})
+	m.gdop = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "gdop"})
+	m.timeAcc = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "time_accuracy_ns"})
 	m.timeValid = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "time_valid", Help: "1 if UTC is valid"})
-	m.clkBias   = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "clock_bias_ns"})
-	m.clkDrift  = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "clock_drift_nps", Help: "Clock drift in ns/s"})
-	m.clkAcc    = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "clock_accuracy_ns"})
-	m.freqAcc   = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "freq_accuracy_pps", Help: "Frequency accuracy in ps/s"})
-	m.tpQErr    = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "timepulse_quantization_error_ps"})
-	m.satCno    = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "satellite_cno_dbhz", Help: "C/N0 per satellite"}, svLabels)
-	m.satElev   = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "satellite_elevation_degrees"}, svLabels)
-	m.satAzim   = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "satellite_azimuth_degrees"}, svLabels)
-	m.satUsed   = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "satellite_used", Help: "1 if SV used in nav solution"}, svLabels)
+	m.clkBias = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "clock_bias_ns"})
+	m.clkDrift = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "clock_drift_nps", Help: "Clock drift in ns/s"})
+	m.clkAcc = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "clock_accuracy_ns"})
+	m.freqAcc = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "freq_accuracy_pps", Help: "Frequency accuracy in ps/s"})
+	m.tpQErr = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "timepulse_quantization_error_ps"})
+	m.satCno = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "satellite_cno_dbhz", Help: "C/N0 per satellite"}, svLabels)
+	m.satElev = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "satellite_elevation_degrees"}, svLabels)
+	m.satAzim = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "satellite_azimuth_degrees"}, svLabels)
+	m.satUsed = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "satellite_used", Help: "1 if SV used in nav solution"}, svLabels)
 
 	clockLabel := []string{"clock"}
 	m.ts2phcOffset = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "offset_ns", Help: "PTP clock offset in nanoseconds"}, clockLabel)
-	m.ts2phcFreq   = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "freq_ppb", Help: "PTP clock frequency adjustment in ppb"}, clockLabel)
+	m.ts2phcFreq = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "freq_ppb", Help: "PTP clock frequency adjustment in ppb"}, clockLabel)
 
 	reg.MustRegister(
 		m.fixType, m.numSV, m.lat, m.lon, m.altMSL, m.hAcc, m.vAcc,
@@ -106,7 +107,9 @@ func New(reg prometheus.Registerer) *Metrics {
 
 func (m *Metrics) UpdateNavPVT(p *ubx.NavPVT) {
 	m.fixType.Set(float64(p.FixType))
-	m.numSV.Set(float64(p.NumSV))
+	if p.NumSV > 0 {
+		m.numSV.Set(float64(p.NumSV))
+	}
 	m.lat.Set(p.LatDeg())
 	m.lon.Set(p.LonDeg())
 	m.altMSL.Set(p.HMSLMeters())
@@ -154,6 +157,7 @@ func (m *Metrics) UpdateNavSAT(sat *ubx.NavSAT) {
 	defer m.mu.Unlock()
 
 	newSeen := make(map[string]struct{}, len(sat.Svs))
+	usedCount := 0
 	for _, sv := range sat.Svs {
 		gnss := gnssNames[sv.GnssID]
 		if gnss == "" {
@@ -168,13 +172,17 @@ func (m *Metrics) UpdateNavSAT(sat *ubx.NavSAT) {
 		used := 0.0
 		if sv.SvUsed() {
 			used = 1.0
+			usedCount++
 		}
 		m.satUsed.WithLabelValues(gnss, svid).Set(used)
 	}
 	for key := range m.satSeen {
 		if _, ok := newSeen[key]; !ok {
-			var gnss, svid string
-			fmt.Sscanf(key, "%[^/]/%s", &gnss, &svid)
+			parts := strings.SplitN(key, "/", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			gnss, svid := parts[0], parts[1]
 			m.satCno.DeleteLabelValues(gnss, svid)
 			m.satElev.DeleteLabelValues(gnss, svid)
 			m.satAzim.DeleteLabelValues(gnss, svid)
@@ -182,6 +190,10 @@ func (m *Metrics) UpdateNavSAT(sat *ubx.NavSAT) {
 		}
 	}
 	m.satSeen = newSeen
+
+	if usedCount > 0 {
+		m.numSV.Set(float64(usedCount))
+	}
 }
 
 func (m *Metrics) UpdateTS2PHC(clock string, offset float64, freq float64) {

@@ -28,6 +28,11 @@ const (
 	IDAckAck = 0x01
 	IDAckNak = 0x00
 
+	IDCfgCfg    = 0x09
+	IDCfgMsg    = 0x01
+	IDCfgTp5    = 0x31
+	IDCfgGnss   = 0x3e
+	IDCfgNav5   = 0x24
 	IDCfgValset = 0x8a
 	IDCfgValget = 0x8b
 
@@ -52,45 +57,45 @@ const (
 
 // NavPVT is UBX-NAV-PVT (0x01 0x07), 92 bytes.
 type NavPVT struct {
-	ITOW   uint32 // ms
-	Year   uint16
-	Month  uint8
-	Day    uint8
-	Hour   uint8
-	Min    uint8
-	Sec    uint8
-	Valid  uint8
-	TAcc   uint32 // ns
-	Nano   int32  // ns
+	ITOW    uint32 // ms
+	Year    uint16
+	Month   uint8
+	Day     uint8
+	Hour    uint8
+	Min     uint8
+	Sec     uint8
+	Valid   uint8
+	TAcc    uint32 // ns
+	Nano    int32  // ns
 	FixType uint8
-	Flags  uint8
-	Flags2 uint8
-	NumSV  uint8
-	Lon    int32 // 1e-7 deg
-	Lat    int32 // 1e-7 deg
-	Height int32 // mm
-	HMSL   int32 // mm above MSL
-	HAcc   uint32 // mm
-	VAcc   uint32 // mm
-	VelN   int32  // mm/s
-	VelE   int32  // mm/s
-	VelD   int32  // mm/s
-	GSpeed int32  // mm/s
-	HeadMot int32 // 1e-5 deg
-	SAcc   uint32 // mm/s
+	Flags   uint8
+	Flags2  uint8
+	NumSV   uint8
+	Lon     int32  // 1e-7 deg
+	Lat     int32  // 1e-7 deg
+	Height  int32  // mm
+	HMSL    int32  // mm above MSL
+	HAcc    uint32 // mm
+	VAcc    uint32 // mm
+	VelN    int32  // mm/s
+	VelE    int32  // mm/s
+	VelD    int32  // mm/s
+	GSpeed  int32  // mm/s
+	HeadMot int32  // 1e-5 deg
+	SAcc    uint32 // mm/s
 	HeadAcc uint32 // 1e-5 deg
-	PDOP   uint16 // 0.01
-	Flags3 uint8
+	PDOP    uint16 // 0.01
+	Flags3  uint8
 }
 
-func (p *NavPVT) GnssFixOK() bool { return p.Flags&0x01 != 0 }
-func (p *NavPVT) LonDeg() float64 { return float64(p.Lon) * 1e-7 }
-func (p *NavPVT) LatDeg() float64 { return float64(p.Lat) * 1e-7 }
+func (p *NavPVT) GnssFixOK() bool     { return p.Flags&0x01 != 0 }
+func (p *NavPVT) LonDeg() float64     { return float64(p.Lon) * 1e-7 }
+func (p *NavPVT) LatDeg() float64     { return float64(p.Lat) * 1e-7 }
 func (p *NavPVT) HMSLMeters() float64 { return float64(p.HMSL) / 1000.0 }
 func (p *NavPVT) HAccMeters() float64 { return float64(p.HAcc) / 1000.0 }
 func (p *NavPVT) VAccMeters() float64 { return float64(p.VAcc) / 1000.0 }
-func (p *NavPVT) GSpeedMPS() float64 { return float64(p.GSpeed) / 1000.0 }
-func (p *NavPVT) PDOPVal() float64   { return float64(p.PDOP) * 0.01 }
+func (p *NavPVT) GSpeedMPS() float64  { return float64(p.GSpeed) / 1000.0 }
+func (p *NavPVT) PDOPVal() float64    { return float64(p.PDOP) * 0.01 }
 
 func ParseNavPVT(payload []byte) (*NavPVT, error) {
 	if len(payload) < 92 {
@@ -230,10 +235,10 @@ type NavSAT struct {
 type SatInfo struct {
 	GnssID uint8
 	SvID   uint8
-	Cno    uint8  // dBHz
-	Elev   int8   // deg
-	Azim   int16  // deg
-	PrRes  int16  // 0.1 m
+	Cno    uint8 // dBHz
+	Elev   int8  // deg
+	Azim   int16 // deg
+	PrRes  int16 // 0.1 m
 	Flags  uint32
 }
 
@@ -315,8 +320,8 @@ func (t *TimTP) ToTAI(utcTAIOffsetSec int) time.Time {
 
 // MonVer is UBX-MON-VER (0x0a 0x04), variable length.
 type MonVer struct {
-	SwVersion string
-	HwVersion string
+	SwVersion  string
+	HwVersion  string
 	Extensions []string
 }
 

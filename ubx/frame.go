@@ -32,6 +32,11 @@ func (f Frame) ClassID() uint16 {
 	return uint16(f.Class)<<8 | uint16(f.ID)
 }
 
+// Bytes re-encodes the frame into a complete UBX wire frame.
+func (f Frame) Bytes() []byte {
+	return Encode(f.Class, f.ID, f.Payload)
+}
+
 // Checksum computes Fletcher-8 over class, id, length, and payload.
 func Checksum(class, id uint8, payload []byte) (ckA, ckB uint8) {
 	length := uint16(len(payload))

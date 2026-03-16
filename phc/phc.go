@@ -3,6 +3,7 @@ package phc
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"syscall"
 	"time"
 	"unsafe"
@@ -124,7 +125,7 @@ func (d *Device) GetTime() (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf("clock_gettime failed: %w", err)
 	}
-	return time.Unix(ts.Sec, ts.Nsec), nil
+	return time.Unix(int64(ts.Sec), int64(ts.Nsec)), nil
 }
 
 func (d *Device) GetFreq() (float64, error) {
@@ -139,7 +140,7 @@ func (d *Device) GetFreq() (float64, error) {
 func (d *Device) AdjFreq(ppb float64) error {
 	var tx unix.Timex
 	tx.Modes = unix.ADJ_FREQUENCY
-	tx.Freq = int64(ppb * 65.536) // ppb to scaled ppm
+	setSignedField(&tx, "Freq", int64(ppb*65.536)) // ppb to scaled ppm
 	_, err := unix.ClockAdjtime(d.ClockID(), &tx)
 	if err != nil {
 		return fmt.Errorf("clock_adjtime ADJ_FREQUENCY failed: %w", err)
@@ -159,8 +160,8 @@ func (d *Device) StepTime(offsetNS int64) error {
 		sign = -1
 		step = -step
 	}
-	tx.Time.Sec = sign * (step / 1e9)
-	tx.Time.Usec = sign * (step % 1e9)
+	setSignedField(&tx.Time, "Sec", sign*(step/1e9))
+	setSignedField(&tx.Time, "Usec", sign*(step%1e9))
 
 	// The kernel requires tv_usec to be non-negative
 	if tx.Time.Usec < 0 {
@@ -173,6 +174,21 @@ func (d *Device) StepTime(offsetNS int64) error {
 		return fmt.Errorf("clock_adjtime ADJ_SETOFFSET failed: %w", err)
 	}
 	return nil
+}
+
+func setSignedField(ptr any, field string, value int64) {
+	v := reflect.ValueOf(ptr).Elem().FieldByName(field)
+	if !v.IsValid() || !v.CanSet() {
+		return
+	}
+	min := -(int64(1) << (v.Type().Bits() - 1))
+	max := (int64(1) << (v.Type().Bits() - 1)) - 1
+	if value < min {
+		value = min
+	} else if value > max {
+		value = max
+	}
+	v.SetInt(value)
 }
 
 func (d *Device) GetCaps() (ClockCaps, error) {

@@ -6,20 +6,20 @@ import "encoding/binary"
 // Key format: bits[28:31]=size, bits[16:27]=group, bits[0:15]=item.
 const (
 	// MSGOUT - USB port message rates
-	CfgMsgoutNmeaRmcUSB     uint32 = 0x209100ae
-	CfgMsgoutNmeaZdaUSB     uint32 = 0x209100db
-	CfgMsgoutNmeaGgaUSB     uint32 = 0x209100c0 // to disable
-	CfgMsgoutNmeaGllUSB     uint32 = 0x209100cc // to disable
-	CfgMsgoutNmeaGsaUSB     uint32 = 0x209100c3 // to disable
-	CfgMsgoutNmeaGsvUSB     uint32 = 0x209100c9 // to disable
-	CfgMsgoutNmeaVtgUSB     uint32 = 0x209100b4 // to disable
-	CfgMsgoutUbxNavPvtUSB   uint32 = 0x20910009
-	CfgMsgoutUbxNavDopUSB   uint32 = 0x2091003b
-	CfgMsgoutUbxNavTimeUSB  uint32 = 0x2091005e
-	CfgMsgoutUbxNavClkUSB   uint32 = 0x20910068
-	CfgMsgoutUbxNavSatUSB   uint32 = 0x20910018
-	CfgMsgoutUbxTimTpUSB    uint32 = 0x20910180
-	CfgMsgoutUbxNavSigUSB   uint32 = 0x20910348
+	CfgMsgoutNmeaRmcUSB    uint32 = 0x209100ae
+	CfgMsgoutNmeaZdaUSB    uint32 = 0x209100db
+	CfgMsgoutNmeaGgaUSB    uint32 = 0x209100c0 // to disable
+	CfgMsgoutNmeaGllUSB    uint32 = 0x209100cc // to disable
+	CfgMsgoutNmeaGsaUSB    uint32 = 0x209100c3 // to disable
+	CfgMsgoutNmeaGsvUSB    uint32 = 0x209100c9 // to disable
+	CfgMsgoutNmeaVtgUSB    uint32 = 0x209100b4 // to disable
+	CfgMsgoutUbxNavPvtUSB  uint32 = 0x20910009
+	CfgMsgoutUbxNavDopUSB  uint32 = 0x2091003b
+	CfgMsgoutUbxNavTimeUSB uint32 = 0x2091005e
+	CfgMsgoutUbxNavClkUSB  uint32 = 0x20910068
+	CfgMsgoutUbxNavSatUSB  uint32 = 0x20910018
+	CfgMsgoutUbxTimTpUSB   uint32 = 0x20910180
+	CfgMsgoutUbxNavSigUSB  uint32 = 0x20910348
 
 	// RATE
 	CfgRateMeas    uint32 = 0x30210001 // U2, measurement period ms
@@ -33,8 +33,8 @@ const (
 	CfgTpAntCableDelay uint32 = 0x30050001 // I2, ns
 
 	// USB protocol masks
-	CfgUSBInprotUBX  uint32 = 0x10770001 // L (bool)
-	CfgUSBInprotNMEA uint32 = 0x10770002
+	CfgUSBInprotUBX   uint32 = 0x10770001 // L (bool)
+	CfgUSBInprotNMEA  uint32 = 0x10770002
 	CfgUSBOutprotUBX  uint32 = 0x10780001
 	CfgUSBOutprotNMEA uint32 = 0x10780002
 )
@@ -44,6 +44,18 @@ const (
 	LayerRAM   uint8 = 1 << 0
 	LayerBBR   uint8 = 1 << 1
 	LayerFlash uint8 = 1 << 2
+)
+
+// Legacy CFG-CFG section masks for u-blox 8 receivers.
+const (
+	CfgCfgMaskNavConf uint32 = 1 << 3
+	CfgCfgMaskAll     uint32 = 0x0000ffff
+)
+
+// CFG-CFG device mask bits.
+const (
+	CfgCfgDevBBR   uint8 = 1 << 0
+	CfgCfgDevFlash uint8 = 1 << 1
 )
 
 // cfgItem is a key-value pair for VALSET.
@@ -106,4 +118,22 @@ func EncodeValget(layer uint8, keys ...uint32) []byte {
 		binary.LittleEndian.PutUint32(payload[4+i*4:], k)
 	}
 	return Encode(ClassCFG, IDCfgValget, payload)
+}
+
+// EncodeCfgNav5DynModel builds UBX-CFG-NAV5 setting only dynModel.
+func EncodeCfgNav5DynModel(dynModel uint8) []byte {
+	payload := make([]byte, 36)
+	binary.LittleEndian.PutUint16(payload[0:2], 1<<0) // apply dynModel only
+	payload[2] = dynModel
+	return Encode(ClassCFG, IDCfgNav5, payload)
+}
+
+// EncodeCfgCfgSave builds UBX-CFG-CFG save request for selected sections.
+func EncodeCfgCfgSave(saveMask uint32, deviceMask uint8) []byte {
+	payload := make([]byte, 13)
+	// clearMask is zero
+	binary.LittleEndian.PutUint32(payload[4:8], saveMask)
+	// loadMask is zero
+	payload[12] = deviceMask
+	return Encode(ClassCFG, IDCfgCfg, payload)
 }

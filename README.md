@@ -1,43 +1,40 @@
 # ts2phc-go
 
-A single-daemon GPS-disciplined PTP clock synchronizer for Linux. Reads UBX from a u-blox GNSS receiver (e.g. NEO-M9N), disciplines a PTP Hardware Clock (PHC) via 1PPS/EXTTS, serves NMEA over TCP for gpsd/cgps, and exports Prometheus metrics for both GPS state and clock sync quality.
+A single-daemon GPS-disciplined PTP clock synchronizer for Linux. Reads GPS time from gpsd, disciplines a PTP Hardware Clock (PHC) via 1PPS/EXTTS, and exports Prometheus metrics for both GPS state and clock sync quality.
 
 Replaces the need for separate `ts2phc` + GPS daemon services.
 
 ## Architecture
 
 ```
-Serial (/dev/ttyACM0)          PHC (/dev/ptp0)
+gpsd (/dev/ttyACM0)          PHC (/dev/ptp0)
         │                            │
         ▼                            │
-   ┌─────────┐                       │
-   │  demux  │  UBX/NMEA stream      │
-   └────┬────┘                       │
-        │                            │
-        ▼                            ▼
-   ┌─────────┐               ┌──────────────┐
-   │ handler │──NavPVT UTC──▶│  PPS Sink    │
-   │         │               │  EXTTS poll  │
-   │         │               │  PI servo    │
+   ┌──────────┐                      │
+   │ GpsdSrc  │  JSON :2947          │
+   │ TPV/SKY  │                      │
+   └────┬─────┘                      │
+        │                            ▼
+        ▼                    ┌──────────────┐
+   ┌─────────┐               │  PPS Sink    │
+   │  main   │──TAI time───▶│  EXTTS poll  │
+   │  loop   │               │  PI servo    │
    │         │               │  AdjFreq/    │
    │         │               │  StepTime    │
-   └──┬──┬───┘               └──────────────┘
-      │  │
-      │  └──▶ TCP :2948 ──▶ gpsd / cgps
+   └──┬──────┘               └──────────────┘
       │
       └─────▶ Prometheus :9100/metrics
 ```
 
-- **Demux goroutine** reads the mixed UBX/NMEA serial stream, dispatches frames to the handler.
-- **Handler** extracts UTC time from NAV-PVT and feeds it to the UBX source, updates GPS metrics, and broadcasts generated NMEA sentences to TCP clients.
+- **GpsdSource** connects to gpsd's JSON stream, parses TPV messages for UTC time, converts to TAI.
 - **PPS discipline loop** waits for EXTTS events on the PHC, computes offset against the GPS-derived reference time, and steers the hardware clock via a PI servo.
-- **TCP export** generates NMEA (GGA, RMC, GSA, GSV, ZDA, VTG) from UBX and serves it on `:2948` for gpsd.
-- **Prometheus metrics** cover GPS fix quality, satellite tracking, clock bias/drift, and ts2phc offset/frequency.
+- **Prometheus metrics** cover GPS fix quality, satellite tracking, and ts2phc offset/frequency.
+- gpsd owns the serial port and handles SHM for chrony/ntpd.
 
 ## Requirements
 
 - Linux with a PTP-capable NIC (EXTTS support)
-- u-blox GNSS receiver with UBX protocol (tested with NEO-M9N)
+- gpsd running and connected to a u-blox GNSS receiver (tested with NEO-M9N)
 - Go 1.25+
 - Root or `CAP_SYS_TIME` for PHC ioctls
 
@@ -45,27 +42,31 @@ Serial (/dev/ttyACM0)          PHC (/dev/ptp0)
 
 ```bash
 go build -o ts2phc-go .
+go build -o ubxcfg ./cmd/ubxcfg
 ```
 
 ## Usage
 
 ```bash
-sudo ./ts2phc-go --dev /dev/ttyACM0 --sink /dev/ptp0
+# 1. Configure the receiver (once, or via udev rule)
+sudo ./ubxcfg --dev /dev/ttyACM0
+
+# 2. Start gpsd on the serial port
+gpsd /dev/ttyACM0
+
+# 3. Start ts2phc-go
+sudo ./ts2phc-go --sink /dev/ptp0
 ```
 
 ### CLI Flags
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--dev` | | `/dev/ttyACM0` | GPS serial device path |
-| `--baud` | | `115200` | GPS serial baud rate |
-| `--ant-cable-delay-ns` | | `38` | Antenna cable delay in nanoseconds |
+| `--gpsd-addr` | | `localhost:2947` | gpsd JSON stream address |
 | `--sink` | `-c` | `/dev/ptp0` | PHC device to discipline |
 | `--autocfg` | `-a` | `false` | Enable ptp4l PMC autoconfiguration |
 | `--tai-offset` | | `37` | TAI-UTC offset in seconds (overridden by `--leapfile` if not explicitly set) |
 | `--leapfile` | | `/usr/share/zoneinfo/leap-seconds.list` | Leap seconds file to derive TAI-UTC offset, if present |
-| `--tcp-addr` | | `:2948` | TCP NMEA export listen address |
-| `--tcp` | | `true` | Enable TCP NMEA export for gpsd |
 | `--metrics-addr` | | `:9100` | Prometheus metrics listen address |
 | `--metrics` | | `true` | Enable Prometheus metrics server |
 | `--config` | | `~/.ts2phc-go.yaml` | Config file path |
@@ -75,55 +76,64 @@ sudo ./ts2phc-go --dev /dev/ttyACM0 --sink /dev/ptp0
 All flags can be set in a YAML config file (`~/.ts2phc-go.yaml` by default, or `--config /path/to/file.yaml`):
 
 ```yaml
-dev: /dev/ttyACM0
-baud: 115200
+gpsd_addr: "localhost:2947"
 sink: /dev/ptp0
 tai_offset: 37
-ant_cable_delay_ns: 38
 leapfile: /usr/share/zoneinfo/leap-seconds.list
-tcp_addr: ":2948"
 metrics_addr: ":9100"
 ```
 
-Environment variables with the `TS2PHC_` prefix also work (e.g. `TS2PHC_DEV=/dev/ttyACM1`).
+Environment variables with the `TS2PHC_` prefix also work (e.g. `TS2PHC_SINK=/dev/ptp1`).
 
-### gpsd Integration
+### ubxcfg — Receiver Configuration Tool
 
-Point gpsd at the TCP NMEA stream:
+A standalone tool for configuring u-blox receivers. It supports both M8N and M9N receivers with automatic detection (`MON-VER`) and optional manual mode override.
 
 ```bash
-gpsd tcp://localhost:2948
+sudo ./ubxcfg --dev /dev/ttyACM0 --mode auto --dynmodel 2 --ant-cable-delay-ns 38
 ```
 
-Then use `cgps`, `gpsmon`, or any gpsd client as usual.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dev` | `/dev/ttyACM0` | Serial device |
+| `--baud` | `115200` | Baud rate (`m8n`: tried first during baud probe) |
+| `--mode` | `auto` | Receiver mode (`auto`, `m8n`, `m9n`) |
+| `--dynmodel` | `2` | Dynamic model (0=portable, 2=stationary) |
+| `--ant-cable-delay-ns` | `38` | Antenna cable delay in ns (M8N + M9N) |
+
+Behavior by mode:
+- `m9n`: uses `UBX-CFG-VALSET` and saves to `RAM+BBR+FLASH`, configures dynamic model, antenna cable delay, UBX message output (NAV-PVT, NAV-DOP, NAV-TIMEUTC, NAV-CLOCK, NAV-SAT, TIM-TP, NAV-SIG), and USB UBX/NMEA protocols.
+- `m8n`: probes common baud rates, upgrades receiver baud to `115200` if needed, applies `UBX-CFG-GNSS` (Galileo on, QZSS off), applies `UBX-CFG-MSG` NMEA profile (GGA/RMC/ZDA on; GLL/GSA/GSV/VTG off), applies antenna cable delay through `UBX-CFG-TP5`, applies `UBX-CFG-NAV5` dynamic model, then persists with `UBX-CFG-CFG/save` to `BBR+FLASH`.
+
+Examples:
+
+```bash
+# Auto-detect receiver type (recommended)
+sudo ./ubxcfg --dev /dev/ttyACM0 --mode auto --dynmodel 2
+
+# Force M8N path
+sudo ./ubxcfg --dev /dev/ttyACM0 --mode m8n --dynmodel 2
+
+# Force M9N path
+sudo ./ubxcfg --dev /dev/ttyACM0 --mode m9n --dynmodel 2 --ant-cable-delay-ns 38
+```
 
 ### systemd
 
 ```ini
 [Unit]
 Description=GPS-disciplined PTP clock daemon
-After=network.target
+After=gpsd.service
+Requires=gpsd.service
 
 [Service]
-ExecStart=/usr/local/bin/ts2phc-go --dev /dev/ttyACM0 --sink /dev/ptp0
+ExecStart=/usr/local/bin/ts2phc-go --sink /dev/ptp0
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
-
-## GPS Module Configuration
-
-On startup, the daemon sends a UBX-CFG-VALSET to the receiver (RAM layer) to configure:
-
-- **Dynamic model**: Stationary (2)
-- **Antenna cable delay**: from `--ant-cable-delay-ns`
-- **UBX messages enabled on USB**: NAV-PVT, NAV-DOP, NAV-TIMEUTC, NAV-CLOCK, NAV-SAT (every 5th epoch), TIM-TP
-- **NMEA output disabled on USB**: all native NMEA sentences suppressed (NMEA is generated from UBX internally)
-- **Protocol**: UBX-only output, UBX input
-
-No flash writes are made — the configuration is RAM-only and resets on receiver power cycle.
 
 ## PPS Discipline
 
@@ -181,17 +191,17 @@ All metrics are served on `--metrics-addr` (default `:9100`) at `/metrics`.
 | `ts2phc_offset_ns` | `clock` | PHC clock offset from GPS in nanoseconds |
 | `ts2phc_freq_ppb` | `clock` | Frequency adjustment applied to PHC in ppb |
 
+Note: GPS metrics that require UBX-specific data not available via gpsd JSON (clock bias/drift, time accuracy, timepulse quantization error) will remain at zero.
+
 ## Package Layout
 
 ```
 .
-├── main.go           Entry point, cobra CLI, GPS init, PPS discipline loop
+├── main.go           Entry point, cobra CLI, gpsd source, PPS discipline loop
+├── cmd/ubxcfg/       Standalone u-blox receiver configuration tool
 ├── ubx/              UBX protocol: frame encode/decode, message parsers, CFG-VALSET
-├── demux/            Serial stream demuxer (UBX/NMEA dispatch)
-├── gpsnmea/          NMEA sentence generation from UBX (GGA, RMC, GSA, GSV, ZDA, VTG)
-├── export/           TCP fan-out server for gpsd
 ├── metrics/          Prometheus gauges for GPS + ts2phc
-├── pps/              PPS source/sink abstractions, EXTTS polling, edge filtering
+├── pps/              PPS source/sink, EXTTS polling, edge filtering, gpsd client
 ├── phc/              PHC device access (ioctls, EXTTS, clock adjustment)
 ├── servo/            PI servo for clock discipline
 └── pmc/              PTP Management Client (optional ptp4l integration)
