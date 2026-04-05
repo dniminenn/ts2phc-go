@@ -237,6 +237,7 @@ func (s *PiServo) SyncInterval(interval float64) {
 
 func (s *PiServo) Reset() {
 	s.count = 0
+	s.firstUpdate = true
 }
 
 func (s *PiServo) IsLocked() bool {

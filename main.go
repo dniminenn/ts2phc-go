@@ -57,16 +57,23 @@ func init() {
 	f.String("metrics-addr", ":9100", "prometheus metrics listen address")
 	f.Bool("metrics", true, "enable Prometheus metrics server")
 
+	// Servo flags
+	f.Float64("step-threshold", 0.0, "step the clock when offset > this value (in seconds, 0.0 to disable)")
+	f.Float64("first-step-threshold", 0.00002, "step the clock on first update if offset > this value (in seconds)")
+
 	for _, key := range []string{
 		"gpsd_addr",
 		"sink", "autocfg", "tai_offset", "leapfile",
 		"metrics_addr", "metrics",
+		"step_threshold", "first_step_threshold",
 	} {
 		_ = viper.BindPFlag(key, f.Lookup(key))
 	}
 	_ = viper.BindPFlag("gpsd_addr", f.Lookup("gpsd-addr"))
 	_ = viper.BindPFlag("tai_offset", f.Lookup("tai-offset"))
 	_ = viper.BindPFlag("metrics_addr", f.Lookup("metrics-addr"))
+	_ = viper.BindPFlag("step_threshold", f.Lookup("step-threshold"))
+	_ = viper.BindPFlag("first_step_threshold", f.Lookup("first-step-threshold"))
 }
 
 func initConfig() {
@@ -105,6 +112,8 @@ func run(cmd *cobra.Command, args []string) error {
 	leapfile := viper.GetString("leapfile")
 	metricsAddr := viper.GetString("metrics_addr")
 	enableMetrics := viper.GetBool("metrics")
+	stepThresh := viper.GetFloat64("step_threshold") * 1e9
+	firstStepThresh := viper.GetFloat64("first_step_threshold") * 1e9
 
 	if !cmd.Flags().Lookup("tai-offset").Changed && leapfile != "" {
 		if v, err := loadTAIOffset(leapfile); err == nil {
@@ -146,7 +155,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// --- PPS sink ---
 	polarity := uint32(phc.PTP_RISING_EDGE | phc.PTP_FALLING_EDGE)
-	sink, err := pps.NewSink(ptpSink, 0, polarity)
+	sink, err := pps.NewSink(ptpSink, 0, polarity, stepThresh, firstStepThresh)
 	if err != nil {
 		return fmt.Errorf("open PPS sink: %w", err)
 	}
