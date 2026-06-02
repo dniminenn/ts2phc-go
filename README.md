@@ -17,7 +17,7 @@ gpsd (/dev/ttyACM0)          PHC (/dev/ptp0)
         │                            ▼
         ▼                    ┌──────────────┐
    ┌─────────┐               │  PPS Sink    │
-   │  main   │──TAI time───▶│  EXTTS poll  │
+   │  main   │──TAI time───▶ │  EXTTS poll  │
    │  loop   │               │  PI servo    │
    │         │               │  AdjFreq/    │
    │         │               │  StepTime    │
