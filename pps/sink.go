@@ -29,6 +29,12 @@ type Sink struct {
 	pulseWidth  time.Duration
 	pulsePeriod time.Duration
 
+	// singleEdge is set when Arm() fell back to a rising-only or falling-only
+	// EXTTS request. In that mode the card emits exactly one edge per second, so
+	// the two-edge pulse-width filter would never observe a short delta and would
+	// stay in FilterStateLocking forever; ProcessEvent uses a period check instead.
+	singleEdge bool
+
 	// Last validated EXTTS hardware timestamp
 	LastValidTS time.Time
 	IsAvailable bool
@@ -92,6 +98,7 @@ func (s *Sink) Arm() error {
 	if err2 == nil {
 		fmt.Printf("[%s] both-edge EXTTS failed, armed rising-edge only\n", s.Name)
 		s.Polarity = phc.PTP_RISING_EDGE
+		s.singleEdge = true
 		return nil
 	}
 
@@ -99,6 +106,7 @@ func (s *Sink) Arm() error {
 	if err3 == nil {
 		fmt.Printf("[%s] rising-edge EXTTS failed, armed falling-edge only\n", s.Name)
 		s.Polarity = phc.PTP_FALLING_EDGE
+		s.singleEdge = true
 		return nil
 	}
 
@@ -119,6 +127,25 @@ func (s *Sink) ProcessEvent(event phc.ExttsEvent, forceIgnore bool) (time.Time, 
 	if forceIgnore {
 		s.lastEvent = now
 		return now, false
+	}
+
+	// Single-edge mode: exactly one edge per second, so every event is a true
+	// start-of-second. There is no trailing edge to discard; we only sanity-check
+	// that consecutive edges are ~1s apart and reject obvious glitches/missed
+	// interrupts. The two-edge filter below is bypassed entirely.
+	if s.singleEdge {
+		if s.state == FilterStateInit {
+			s.lastEvent = now
+			s.state = FilterStateLocked
+			return now, false // need a prior event to measure the period
+		}
+		delta := now.Sub(s.lastEvent)
+		s.lastEvent = now
+		drift := delta - s.pulsePeriod
+		if drift > 100*time.Millisecond || drift < -100*time.Millisecond {
+			return now, false
+		}
+		return now, true
 	}
 
 	if s.state == FilterStateInit {

@@ -24,7 +24,15 @@ const (
 	PTP_SYS_OFFSET_PRECISE  = 0xc0403d08
 	PTP_SYS_OFFSET_EXTENDED = 0xc0483d09
 
-	PTP_EXTTS_REQUEST2 = 0x40103d0a // _IOW('=', 10, struct ptp_extts_request)
+	// NOTE: This is INTENTIONALLY not the real PTP_EXTTS_REQUEST2 number
+	// (which is _IOW('=', 11, ...) == 0x40103d0b). Value 0x40103d0a matches no
+	// kernel command, so RequestExtts's v2 attempt always returns ENOTTY and
+	// falls back to the v1 PTP_EXTTS_REQUEST. That fallback is deliberate: the
+	// v1 path never sets PTP_STRICT_FLAGS, and the i210/igb driver requires that
+	// — it rejects both-edge requests (EOPNOTSUPP) under strict flags, and the
+	// sink's dynamic edge filter depends on receiving both edges. Do not "fix"
+	// this to 0x40103d0b without re-validating EXTTS capture on the i210.
+	PTP_EXTTS_REQUEST2 = 0x40103d0a // see NOTE above
 
 	PTP_MASK_CLEAR_ALL  = 0x20003d13 // _IO('=', 19)
 	PTP_MASK_EN_SINGLE  = 0x40043d14 // _IOW('=', 20, uint32)
@@ -74,16 +82,21 @@ type PinDesc struct {
 	Rsv0  [5]uint32
 }
 
+// ClockCaps mirrors struct ptp_clock_caps from <linux/ptp_clock.h>.
+// Field order and count must match the kernel exactly: PTP_CLOCK_GETCAPS
+// copies sizeof(struct ptp_clock_caps) == 80 bytes (20 ints) into this
+// buffer, so a short struct gets memory written past its end.
 type ClockCaps struct {
-	MaxAdj      int32
-	NAlarm      int32
-	NExtTs      int32
-	NPerOut     int32
-	NPins       int32
-	PPS         int32
-	NTimeStamps int32 // Since Linux 5.8
-	NProgMac    int32
-	Rsv         [11]int32
+	MaxAdj            int32
+	NAlarm            int32
+	NExtTs            int32
+	NPerOut           int32
+	PPS               int32
+	NPins             int32
+	CrossTimestamping int32 // Since Linux 5.8
+	AdjustPhase       int32
+	MaxPhaseAdj       int32
+	Rsv               [11]int32
 }
 
 type Device struct {

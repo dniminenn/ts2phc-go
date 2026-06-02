@@ -69,26 +69,27 @@ func (a *GpsdMetricsAdapter) OnSKY(sky *GpsdSKY) {
 	}
 	a.Metrics.UpdateNavDOP(dop)
 
-	if len(sky.Satellites) > 0 {
-		svs := make([]ubx.SatInfo, len(sky.Satellites))
-		for i, sv := range sky.Satellites {
-			var flags uint32
-			if sv.Used {
-				flags |= 0x08
-			}
-			svs[i] = ubx.SatInfo{
-				GnssID: uint8(sv.GnssID),
-				SvID:   uint8(sv.SvID),
-				Cno:    uint8(sv.Ss),
-				Elev:   int8(sv.El),
-				Azim:   int16(sv.Az),
-				Flags:  flags,
-			}
+	// Always publish, including empty satellite lists: an empty SKY report means
+	// signal loss, and we must clear stale per-satellite series and drop the used
+	// count to zero rather than leaving the last healthy snapshot in place.
+	svs := make([]ubx.SatInfo, len(sky.Satellites))
+	for i, sv := range sky.Satellites {
+		var flags uint32
+		if sv.Used {
+			flags |= 0x08
 		}
-		sat := &ubx.NavSAT{
-			NumSvs: uint8(len(svs)),
-			Svs:    svs,
+		svs[i] = ubx.SatInfo{
+			GnssID: uint8(sv.GnssID),
+			SvID:   uint8(sv.SvID),
+			Cno:    uint8(sv.Ss),
+			Elev:   int8(sv.El),
+			Azim:   int16(sv.Az),
+			Flags:  flags,
 		}
-		a.Metrics.UpdateNavSAT(sat)
 	}
+	sat := &ubx.NavSAT{
+		NumSvs: uint8(len(svs)),
+		Svs:    svs,
+	}
+	a.Metrics.UpdateNavSAT(sat)
 }

@@ -2,7 +2,17 @@
 
 A single-daemon GPS-disciplined PTP clock synchronizer for Linux. Reads GPS time from gpsd, disciplines a PTP Hardware Clock (PHC) via 1PPS/EXTTS, and exports Prometheus metrics for both GPS state and clock sync quality.
 
-Replaces the need for separate `ts2phc` + GPS daemon services.
+It replaces linuxptp's `ts2phc` daemon (it still relies on `gpsd` for the GPS receiver; see [Architecture](#architecture)), and was written specifically to handle the **Intel i210**, whose EXTTS quirks vanilla `ts2phc` does not cope with. See [The i210 (and why this exists)](#the-i210-and-why-this-exists).
+
+## The i210 (and why this exists)
+
+This daemon exists because the Intel **i210** (igb driver), a common cheap NIC for GPS-PPS-on-SDP grandmasters, does not play nicely with stock `ts2phc` when the GPS 1PPS is wired to a Software-Definable Pin. The non-obvious behaviors it works around:
+
+- **GPS PPS on SDP0.** The PPS is fed to pin `SDP0`, which must be programmed as an EXTTS input (`PTP_PF_EXTTS`) before events arrive. The daemon does this via `PTP_PIN_SETFUNC` at startup.
+- **The igb driver rejects strict-flag EXTTS.** The modern `PTP_EXTTS_REQUEST2` ioctl carries `PTP_STRICT_FLAGS`, and igb returns `EOPNOTSUPP` for a both-edge request under strict flags. So the daemon **deliberately uses the legacy `PTP_EXTTS_REQUEST` (v1) path**, which the driver accepts. The `PTP_EXTTS_REQUEST2` constant in `phc/phc.go` is intentionally set to a *non-matching* ioctl number so the v2 attempt fails fast and falls back to v1. There is a NOTE comment at the constant; do not "fix" it to the canonical value without re-validating capture on the i210.
+- **The i210 timestamps *both* edges** of the PPS pulse regardless of the polarity requested. The daemon's **dynamic edge filter** (`pps/sink.go`) locks onto the pulse pattern (a clean lock logs `edge filter locked, pulse width ~10ms`) and discards the trailing edge, keeping only the true start-of-second. A NIC that honors single-edge requests is also handled, via a separate period-check path.
+
+If you are running on hardware that honors EXTTS edge selection and strict flags, none of the above hurts; the v1 path and the edge filter still produce correct locks.
 
 ## Architecture
 
@@ -34,7 +44,7 @@ gpsd (/dev/ttyACM0)          PHC (/dev/ptp0)
 ## Requirements
 
 - Linux with a PTP-capable NIC (EXTTS support)
-- gpsd running and connected to a u-blox GNSS receiver (tested with NEO-M9N)
+- gpsd running and connected to a u-blox GNSS receiver (`ubxcfg` supports M8N and M9N; tested with NEO-M9N)
 - Go 1.25+
 - Root or `CAP_SYS_TIME` for PHC ioctls
 
@@ -67,6 +77,8 @@ sudo ./ts2phc-go --sink /dev/ptp0
 | `--autocfg` | `-a` | `false` | Enable ptp4l PMC autoconfiguration |
 | `--tai-offset` | | `37` | TAI-UTC offset in seconds (overridden by `--leapfile` if not explicitly set) |
 | `--leapfile` | | `/usr/share/zoneinfo/leap-seconds.list` | Leap seconds file to derive TAI-UTC offset, if present |
+| `--step-threshold` | | `0.0` | Step the clock when offset exceeds this many seconds (`0.0` disables ongoing steps; the servo slews instead) |
+| `--first-step-threshold` | | `0.00002` | On the first update after start or a servo reset, step instead of slew if offset exceeds this many seconds (default 20 us) |
 | `--metrics-addr` | | `:9100` | Prometheus metrics listen address |
 | `--metrics` | | `true` | Enable Prometheus metrics server |
 | `--config` | | `~/.ts2phc-go.yaml` | Config file path |
@@ -85,7 +97,7 @@ metrics_addr: ":9100"
 
 Environment variables with the `TS2PHC_` prefix also work (e.g. `TS2PHC_SINK=/dev/ptp1`).
 
-### ubxcfg — Receiver Configuration Tool
+### ubxcfg: Receiver Configuration Tool
 
 A standalone tool for configuring u-blox receivers. It supports both M8N and M9N receivers with automatic detection (`MON-VER`) and optional manual mode override.
 
@@ -124,7 +136,7 @@ sudo ./ubxcfg --dev /dev/ttyACM0 --mode m9n --dynmodel 2 --ant-cable-delay-ns 38
 [Unit]
 Description=GPS-disciplined PTP clock daemon
 After=gpsd.service
-Requires=gpsd.service
+Wants=gpsd.service
 
 [Service]
 ExecStart=/usr/local/bin/ts2phc-go --sink /dev/ptp0
@@ -144,7 +156,7 @@ The PPS discipline loop follows the same algorithm as linuxptp's `ts2phc`:
 3. **Offset calculation**: `offset = PHC_timestamp - GPS_UTC_timestamp` (with TAI correction).
 4. **PI servo**: Proportional-integral controller computes frequency adjustment. States: `Unlocked` → `Jump` (step + reset) → `Locked` → `LockedStable`.
 5. **Outlier rejection**: While locked, samples with `|offset| > 50µs` are rejected. 5 consecutive outliers trigger a servo reset.
-6. **Clock steering**: `AdjFreq()` for frequency, `StepTime()` for phase jumps (only in `Jump` state).
+6. **Clock steering**: `AdjFreq()` for frequency, `StepTime()` for phase jumps. Stepping is threshold-gated (see `--step-threshold` / `--first-step-threshold`): by default the servo only steps on the first update after start or a reset if the offset exceeds 20 us, and slews continuously thereafter (ongoing stepping is disabled). On a warm restart the offset is usually sub-microsecond, so it slews rather than steps.
 
 ## Prometheus Metrics
 

@@ -191,9 +191,9 @@ func (m *Metrics) UpdateNavSAT(sat *ubx.NavSAT) {
 	}
 	m.satSeen = newSeen
 
-	if usedCount > 0 {
-		m.numSV.Set(float64(usedCount))
-	}
+	// Always publish, so the used-satellite count falls to zero on signal loss
+	// instead of remaining stuck at the last healthy value.
+	m.numSV.Set(float64(usedCount))
 }
 
 func (m *Metrics) UpdateTS2PHC(clock string, offset float64, freq float64) {
