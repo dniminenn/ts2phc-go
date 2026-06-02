@@ -69,27 +69,32 @@ func (a *GpsdMetricsAdapter) OnSKY(sky *GpsdSKY) {
 	}
 	a.Metrics.UpdateNavDOP(dop)
 
-	// Always publish, including empty satellite lists: an empty SKY report means
-	// signal loss, and we must clear stale per-satellite series and drop the used
-	// count to zero rather than leaving the last healthy snapshot in place.
-	svs := make([]ubx.SatInfo, len(sky.Satellites))
-	for i, sv := range sky.Satellites {
-		var flags uint32
-		if sv.Used {
-			flags |= 0x08
+	// gpsd interleaves DOP-only SKY reports that carry no satellites array (and no
+	// uSat); those are a normal part of its report cadence, NOT signal loss. Only
+	// update satellite series from SKY reports that actually carry satellites, so
+	// the routine empty reports don't wipe the per-satellite series or zero the
+	// used count. A genuine loss still shows: a populated SKY with everything
+	// used=false drives usedCount (and gps_satellites_used) to 0.
+	if len(sky.Satellites) > 0 {
+		svs := make([]ubx.SatInfo, len(sky.Satellites))
+		for i, sv := range sky.Satellites {
+			var flags uint32
+			if sv.Used {
+				flags |= 0x08
+			}
+			svs[i] = ubx.SatInfo{
+				GnssID: uint8(sv.GnssID),
+				SvID:   uint8(sv.SvID),
+				Cno:    uint8(sv.Ss),
+				Elev:   int8(sv.El),
+				Azim:   int16(sv.Az),
+				Flags:  flags,
+			}
 		}
-		svs[i] = ubx.SatInfo{
-			GnssID: uint8(sv.GnssID),
-			SvID:   uint8(sv.SvID),
-			Cno:    uint8(sv.Ss),
-			Elev:   int8(sv.El),
-			Azim:   int16(sv.Az),
-			Flags:  flags,
+		sat := &ubx.NavSAT{
+			NumSvs: uint8(len(svs)),
+			Svs:    svs,
 		}
+		a.Metrics.UpdateNavSAT(sat)
 	}
-	sat := &ubx.NavSAT{
-		NumSvs: uint8(len(svs)),
-		Svs:    svs,
-	}
-	a.Metrics.UpdateNavSAT(sat)
 }

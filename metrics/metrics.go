@@ -191,8 +191,9 @@ func (m *Metrics) UpdateNavSAT(sat *ubx.NavSAT) {
 	}
 	m.satSeen = newSeen
 
-	// Always publish, so the used-satellite count falls to zero on signal loss
-	// instead of remaining stuck at the last healthy value.
+	// Set unconditionally: callers only invoke UpdateNavSAT for SKY reports that
+	// carry satellites, so a populated report with zero used correctly drops
+	// gps_satellites_used to 0 instead of sticking at the last healthy value.
 	m.numSV.Set(float64(usedCount))
 }
 
