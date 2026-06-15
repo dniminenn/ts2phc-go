@@ -1,5 +1,7 @@
 # ts2phc-go
 
+**Writeup:** [Detecting a frozen PTP and GPS clock with ts2phc in Go](https://dnim.dev/blog/ts2phc-go-frozen-clock)
+
 A single-daemon GPS-disciplined PTP clock synchronizer for Linux. Reads GPS time from gpsd, disciplines a PTP Hardware Clock (PHC) via 1PPS/EXTTS, and exports Prometheus metrics for both GPS state and clock sync quality.
 
 It replaces linuxptp's `ts2phc` daemon (it still relies on `gpsd` for the GPS receiver; see [Architecture](#architecture)), and was written specifically to handle the **Intel i210**, whose EXTTS quirks vanilla `ts2phc` does not cope with. See [The i210 (and why this exists)](#the-i210-and-why-this-exists).
