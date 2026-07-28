@@ -39,6 +39,13 @@ type Sink struct {
 	LastValidTS time.Time
 	IsAvailable bool
 
+	// EdgeSeq counts validated start-of-second edges; the 1PPS comb is
+	// hardware-perfect, so second labels anchored to one edge propagate by
+	// counting. Generation bumps whenever the filter loses lock (missed
+	// interrupt, cable pull), invalidating any anchor into the old comb.
+	EdgeSeq    uint64
+	Generation uint64
+
 	// Servo state
 	Servo servo.Servo
 }
@@ -143,8 +150,10 @@ func (s *Sink) ProcessEvent(event phc.ExttsEvent, forceIgnore bool) (time.Time, 
 		s.lastEvent = now
 		drift := delta - s.pulsePeriod
 		if drift > 100*time.Millisecond || drift < -100*time.Millisecond {
+			s.Generation++ // comb continuity broken; second labels are void
 			return now, false
 		}
+		s.EdgeSeq++
 		return now, true
 	}
 
@@ -199,10 +208,12 @@ func (s *Sink) ProcessEvent(event phc.ExttsEvent, forceIgnore bool) (time.Time, 
 		if drift > 100*time.Millisecond || drift < -100*time.Millisecond {
 			// fmt.Printf("[%s] Lost lock. Re-initializing filter.\n", s.Name)
 			s.state = FilterStateInit
+			s.Generation++ // comb continuity broken; second labels are void
 			return now, false
 		}
 
 		// This is a valid, true start-of-second edge.
+		s.EdgeSeq++
 		return now, true
 	}
 

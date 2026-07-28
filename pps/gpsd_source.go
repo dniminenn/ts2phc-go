@@ -12,7 +12,12 @@ import (
 	"ts2phc-go/phc"
 )
 
-const maxTPAge = 2 * time.Second
+// maxTPAge bounds how old a TPV may be and still label PPS edges. Callers
+// compensate for whole seconds of delivery latency by counting comb teeth,
+// so this only needs to cap drift of the local monotonic measurement and
+// catch genuinely dead gpsd feeds. USB receivers have been observed to
+// deliver TPVs in ~3s batches, so this must comfortably exceed that.
+const maxTPAge = 5 * time.Second
 
 // GpsdTPV is the subset of gpsd's TPV JSON we care about.
 type GpsdTPV struct {
@@ -169,7 +174,11 @@ func (s *GpsdSource) processTPV(tpv *GpsdTPV) {
 	}
 }
 
-func (s *GpsdSource) GetPPSTime() (time.Time, error) {
+// GetPPSTime returns the predicted TAI time of the next PPS edge and the
+// local receive time of the TPV it was derived from. The receive time lets
+// callers judge freshness: a TPV older than ~1s predicts an edge that has
+// already passed, so its label would be one second early.
+func (s *GpsdSource) GetPPSTime() (time.Time, time.Time, error) {
 	s.mu.Lock()
 	tai := s.tpTAI
 	rx := s.tpRxTime
@@ -177,12 +186,12 @@ func (s *GpsdSource) GetPPSTime() (time.Time, error) {
 	s.mu.Unlock()
 
 	if !valid {
-		return time.Time{}, fmt.Errorf("gpsd: no valid TPV received yet")
+		return time.Time{}, time.Time{}, fmt.Errorf("gpsd: no valid TPV received yet")
 	}
 	if elapsed := time.Since(rx); elapsed > maxTPAge {
-		return time.Time{}, fmt.Errorf("gpsd: stale TPV (%v)", elapsed)
+		return time.Time{}, time.Time{}, fmt.Errorf("gpsd: stale TPV (%v)", elapsed)
 	}
-	return tai, nil
+	return tai, rx, nil
 }
 
 func (s *GpsdSource) GetClock() *phc.Device { return nil }

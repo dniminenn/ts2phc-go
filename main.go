@@ -111,6 +111,82 @@ type clockState struct {
 	state        uint16
 	isTarget     bool
 	outlierCount int
+	anchor       edgeAnchor
+}
+
+// edgeAnchor labels the 1PPS comb. gpsd's ToD is only needed to identify
+// which second ONE edge belongs to; afterwards labels propagate by counting
+// edges, making pairing immune to gpsd delivery jitter (a TPV arriving
+// ~1s late would otherwise label edges one second early). The anchor is
+// established only after several consecutive TPV labels agree with the edge
+// count, and is dropped when the edge filter loses comb continuity.
+type edgeAnchor struct {
+	anchored   bool
+	generation uint64
+	seq        uint64
+	second     int64 // TAI seconds of edge `seq`
+	// bootstrap / cross-check state
+	candSecond int64
+	candSeq    uint64
+	streak     int
+	mismatches int
+}
+
+const (
+	anchorStreakNeeded  = 3 // consecutive consistent TPV labels to anchor
+	anchorMaxMismatches = 5 // persistent TPV disagreements to re-anchor
+	// tpvPairGuard absorbs the delay between an EXTTS edge firing and the
+	// main loop pairing it (poll wakeup + processing, single-digit ms).
+	tpvPairGuard = 20 * time.Millisecond
+)
+
+// label returns the TAI second of the edge with sequence number seq, plus
+// whether the anchor is usable for the sink's current comb generation.
+func (a *edgeAnchor) label(gen, seq uint64) (int64, bool) {
+	if !a.anchored || a.generation != gen {
+		return 0, false
+	}
+	return a.second + int64(seq-a.seq), true
+}
+
+// observe feeds one fresh TPV-derived label for edge seq; it drives both
+// bootstrap (building the streak) and steady-state cross-checking.
+func (a *edgeAnchor) observe(gen, seq uint64, second int64, sinkName string) {
+	if a.anchored && a.generation == gen {
+		expect := a.second + int64(seq-a.seq)
+		if second == expect {
+			a.mismatches = 0
+			return
+		}
+		a.mismatches++
+		if a.mismatches >= anchorMaxMismatches {
+			log.Printf("[%s] ToD persistently disagrees with edge count by %+ds, re-anchoring",
+				sinkName, second-expect)
+			a.anchored = false
+			a.streak = 0
+			a.mismatches = 0
+		}
+		return
+	}
+
+	// Bootstrap: require the TPV label to advance in lockstep with the
+	// edge count for a few consecutive edges before trusting it.
+	if a.streak > 0 && gen == a.generation && second-a.candSecond == int64(seq-a.candSeq) {
+		a.streak++
+	} else {
+		a.streak = 1
+	}
+	a.generation = gen
+	a.candSecond = second
+	a.candSeq = seq
+
+	if a.streak >= anchorStreakNeeded {
+		a.anchored = true
+		a.seq = seq
+		a.second = second
+		a.mismatches = 0
+		log.Printf("[%s] edge labeling anchored (seq %d = TAI %d)", sinkName, seq, second)
+	}
 }
 
 // gmMonitor demotes/promotes the announced clockClass to match reality:
@@ -331,19 +407,26 @@ func run(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
-			sourceTs, err := source.GetPPSTime()
+			sourceTs, sourceRx, err := source.GetPPSTime()
 			if err != nil {
 				gmMon.Update(false)
 				continue
 			}
 
-			var srcEdge int64
+			var tpvEdge int64
 			if sourceTs.Nanosecond() > 500000000 {
-				srcEdge = sourceTs.Unix() + 1
+				tpvEdge = sourceTs.Unix() + 1
 			} else {
-				srcEdge = sourceTs.Unix()
+				tpvEdge = sourceTs.Unix()
 			}
-			srcNanos := srcEdge * 1e9
+			// The TPV predicted the first edge after its arrival. The edge
+			// being paired fired ~tpvPairGuard ago at most; every whole
+			// second of TPV age beyond that means one more comb tooth has
+			// passed since the predicted edge. This makes labeling exact for
+			// any gpsd delivery latency, including bursty multi-second
+			// batches (seen with USB receivers).
+			age := time.Since(sourceRx) - tpvPairGuard
+			tpvLabel := tpvEdge + int64(math.Floor(age.Seconds()))
 
 			lockedSample := false
 			for _, c := range clocks {
@@ -351,6 +434,14 @@ func run(cmd *cobra.Command, args []string) error {
 					continue
 				}
 				c.sink.IsAvailable = false
+
+				gen, seq := c.sink.Generation, c.sink.EdgeSeq
+				c.anchor.observe(gen, seq, tpvLabel, c.sink.Name)
+				srcEdge, ok := c.anchor.label(gen, seq)
+				if !ok {
+					continue // not anchored yet; skip until bootstrap completes
+				}
+				srcNanos := srcEdge * 1e9
 
 				sinkNanos := c.sink.LastValidTS.Unix()*1e9 + int64(c.sink.LastValidTS.Nanosecond())
 				offset := sinkNanos - srcNanos
