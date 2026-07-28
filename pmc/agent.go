@@ -14,9 +14,26 @@ const (
 	MID_DEFAULT_DATA_SET         = 0x2000
 	MID_PORT_DATA_SET            = 0x2004
 	MID_TIME_PROPERTIES_DATA_SET = 0x2003
+	MID_GRANDMASTER_SETTINGS_NP  = 0xC001
 	MID_PORT_PROPERTIES_NP       = 0xC004
 	MID_PORT_HWCLOCK_NP          = 0xC007
 	MID_SUBSCRIBE_EVENTS_NP      = 0xC003
+)
+
+// timePropertiesDS flags (IEEE 1588-2019 8.2.4)
+const (
+	TF_LEAP_61       = 1 << 0
+	TF_LEAP_59       = 1 << 1
+	TF_UTC_OFF_VALID = 1 << 2
+	TF_PTP_TIMESCALE = 1 << 3
+	TF_TIME_TRACEABLE = 1 << 4
+	TF_FREQ_TRACEABLE = 1 << 5
+)
+
+// timeSource values (IEEE 1588-2019 7.6.2.8)
+const (
+	TS_GNSS                = 0x20
+	TS_INTERNAL_OSCILLATOR = 0xA0
 )
 
 // PTP Message Types
@@ -100,6 +117,8 @@ type Agent struct {
 	syncOffset int
 	leap       int
 	dds        DefaultDS
+	identity   PortIdentity
+	seqId      uint16
 }
 
 func NewAgent(udsPath string) (*Agent, error) {
@@ -113,9 +132,15 @@ func NewAgent(udsPath string) (*Agent, error) {
 		return nil, fmt.Errorf("failed to connect to ptp4l: %w", err)
 	}
 
+	// linuxptp's pmc sends a zero clockIdentity with its PID as the port
+	// number; mirror that so ptp4l treats us identically.
+	var ident PortIdentity
+	ident.PortNumber = uint16(os.Getpid())
+
 	return &Agent{
-		conn:    conn,
-		udsPath: udsPath,
+		conn:     conn,
+		udsPath:  udsPath,
+		identity: ident,
 	}, nil
 }
 
@@ -130,11 +155,13 @@ func (a *Agent) Close() {
 func (a *Agent) sendRequest(mgtId uint16, action uint8, data []byte) error {
 	var msg ManagementMsg
 	msg.Header.SdoIdAndMsgType = MANAGEMENT
-	msg.Header.VersionPTP = 2
+	msg.Header.VersionPTP = 0x12 // PTP v2.1, as linuxptp's pmc sends
+	msg.Header.SourcePortIdentity = a.identity
+	a.seqId++
+	msg.Header.SequenceId = a.seqId
+	msg.Header.LogMessageInterval = 0x7f
 	msg.TargetPortIdentity.ClockIdentity = [8]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 	msg.TargetPortIdentity.PortNumber = 0xffff
-	msg.StartingBoundaryHops = 0
-	msg.BoundaryHops = 0
 	msg.ActionField = action
 
 	tlv := ManagementTLV{
@@ -143,9 +170,10 @@ func (a *Agent) sendRequest(mgtId uint16, action uint8, data []byte) error {
 		Id:     mgtId,
 	}
 
-	// Calculate lengths
-	baseLen := 48 // Size of MsgHeader + Management fields
-	msg.Header.MessageLength = uint16(baseLen + 4 + len(data))
+	// Calculate lengths: 48-byte header+management fields, then the TLV
+	// (type 2 + length 2 + id 2 = 6 bytes) plus its data.
+	baseLen := 48
+	msg.Header.MessageLength = uint16(baseLen + 6 + len(data))
 
 	buf := new(bytes.Buffer)
 	binary.Write(buf, binary.BigEndian, msg.Header)
@@ -167,7 +195,7 @@ func (a *Agent) sendRequest(mgtId uint16, action uint8, data []byte) error {
 
 // Low-level receive response
 func (a *Agent) recvResponse(expectedId uint16) ([]byte, error) {
-	a.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	a.conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	buf := make([]byte, 1024)
 	n, _, err := a.conn.ReadFromUnix(buf)
 	if err != nil {
@@ -222,6 +250,49 @@ func (a *Agent) QueryDDS() error {
 
 func (a *Agent) GetNumberPorts() int {
 	return int(a.dds.NumberPorts)
+}
+
+// GrandmasterSettings mirrors linuxptp's grandmaster_settings_np (8 bytes on
+// the wire): clockQuality, currentUtcOffset, time flags, timeSource.
+type GrandmasterSettings struct {
+	ClockClass              uint8
+	ClockAccuracy           uint8
+	OffsetScaledLogVariance uint16
+	UtcOffset               int16
+	TimeFlags               uint8
+	TimeSource              uint8
+}
+
+func (a *Agent) GetGrandmasterSettings() (*GrandmasterSettings, error) {
+	// GET of this dataset must carry a zero payload sized to the dataset
+	// (8 bytes), matching linuxptp's pmc; ptp4l drops shorter TLVs.
+	if err := a.sendRequest(MID_GRANDMASTER_SETTINGS_NP, GET, make([]byte, 8)); err != nil {
+		return nil, err
+	}
+	data, err := a.recvResponse(MID_GRANDMASTER_SETTINGS_NP)
+	if err != nil {
+		return nil, err
+	}
+	gs := &GrandmasterSettings{}
+	if err := binary.Read(bytes.NewReader(data), binary.BigEndian, gs); err != nil {
+		return nil, err
+	}
+	return gs, nil
+}
+
+// SetGrandmasterSettings pushes new grandmaster settings to ptp4l at runtime;
+// ptp4l starts announcing them immediately. ptp4l acks a SET with a RESPONSE
+// carrying the dataset.
+func (a *Agent) SetGrandmasterSettings(gs *GrandmasterSettings) error {
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.BigEndian, gs); err != nil {
+		return err
+	}
+	if err := a.sendRequest(MID_GRANDMASTER_SETTINGS_NP, SET, buf.Bytes()); err != nil {
+		return err
+	}
+	_, err := a.recvResponse(MID_GRANDMASTER_SETTINGS_NP)
+	return err
 }
 
 func (a *Agent) Subscribe() error {
