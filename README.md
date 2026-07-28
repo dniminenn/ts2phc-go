@@ -81,6 +81,9 @@ sudo ./ts2phc-go --sink /dev/ptp0
 | `--leapfile` | | `/usr/share/zoneinfo/leap-seconds.list` | Leap seconds file to derive TAI-UTC offset, if present |
 | `--step-threshold` | | `0.0` | Step the clock when offset exceeds this many seconds (`0.0` disables ongoing steps; the servo slews instead) |
 | `--first-step-threshold` | | `0.00002` | On the first update after start or a servo reset, step instead of slew if offset exceeds this many seconds (default 20 us) |
+| `--pin-index` | | `0` | SDP pin index carrying the GPS PPS (0 for i210 SDP0, 2 for TimeHAT i226 SDP2) |
+| `--gm-mgmt` | | `false` | Manage ptp4l's announced clockClass over its management socket: 6 locked, 7 holdover, 248 free-run |
+| `--gm-holdover-sec` | | `3600` | Seconds of GPS loss tolerated in holdover (clockClass 7) before demoting to free-run (248) |
 | `--metrics-addr` | | `:9100` | Prometheus metrics listen address |
 | `--metrics` | | `true` | Enable Prometheus metrics server |
 | `--config` | | `~/.ts2phc-go.yaml` | Config file path |

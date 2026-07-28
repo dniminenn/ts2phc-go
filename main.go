@@ -54,6 +54,10 @@ func init() {
 	f.String("leapfile", "/usr/share/zoneinfo/leap-seconds.list", "leap seconds file (if present)")
 	f.Int("pin-index", 0, "SDP pin index carrying the GPS PPS (e.g. 0 for i210 SDP0, 2 for TimeHAT i226 SDP2)")
 
+	// Grandmaster clockClass management
+	f.Bool("gm-mgmt", false, "manage ptp4l grandmaster clockClass over the management socket: 6 locked, 7 holdover, 248 free-run")
+	f.Int("gm-holdover-sec", 3600, "seconds of GPS loss tolerated in holdover (clockClass 7) before demoting to free-run (248)")
+
 	// Metrics flags
 	f.String("metrics-addr", ":9100", "prometheus metrics listen address")
 	f.Bool("metrics", true, "enable Prometheus metrics server")
@@ -67,11 +71,13 @@ func init() {
 		"sink", "autocfg", "tai_offset", "leapfile",
 		"metrics_addr", "metrics",
 		"step_threshold", "first_step_threshold",
-		"pin_index",
+		"pin_index", "gm_mgmt", "gm_holdover_sec",
 	} {
 		_ = viper.BindPFlag(key, f.Lookup(key))
 	}
 	_ = viper.BindPFlag("pin_index", f.Lookup("pin-index"))
+	_ = viper.BindPFlag("gm_mgmt", f.Lookup("gm-mgmt"))
+	_ = viper.BindPFlag("gm_holdover_sec", f.Lookup("gm-holdover-sec"))
 	_ = viper.BindPFlag("gpsd_addr", f.Lookup("gpsd-addr"))
 	_ = viper.BindPFlag("tai_offset", f.Lookup("tai-offset"))
 	_ = viper.BindPFlag("metrics_addr", f.Lookup("metrics-addr"))
@@ -105,6 +111,96 @@ type clockState struct {
 	state        uint16
 	isTarget     bool
 	outlierCount int
+}
+
+// gmMonitor demotes/promotes the announced clockClass to match reality:
+// locked (6) while the servo tracks GPS, holdover (7) on GPS loss while the
+// oscillator can still be trusted, free-run (248) beyond the holdover budget.
+type gmMonitor struct {
+	agent        *pmc.Agent
+	holdover     time.Duration
+	startupGrace time.Duration
+	started      time.Time
+	lastLock     time.Time
+	lastAttempt  time.Time
+	current      string
+}
+
+const (
+	gmLocked   = "locked"
+	gmHoldover = "holdover"
+	gmFreerun  = "freerun"
+)
+
+func newGMMonitor(agent *pmc.Agent, holdoverSec int) *gmMonitor {
+	return &gmMonitor{
+		agent:        agent,
+		holdover:     time.Duration(holdoverSec) * time.Second,
+		startupGrace: 60 * time.Second,
+		started:      time.Now(),
+	}
+}
+
+// Update is called every discipline-loop iteration; lockedSample is true when
+// the servo just consumed a valid PPS+ToD sample in a locked state.
+func (g *gmMonitor) Update(lockedSample bool) {
+	if g == nil {
+		return
+	}
+	now := time.Now()
+	if lockedSample {
+		g.lastLock = now
+	}
+
+	var want string
+	switch {
+	case !g.lastLock.IsZero() && now.Sub(g.lastLock) < 10*time.Second:
+		want = gmLocked
+	case !g.lastLock.IsZero() && now.Sub(g.lastLock) < g.holdover:
+		want = gmHoldover
+	case g.lastLock.IsZero() && now.Sub(g.started) < g.startupGrace:
+		return // never locked yet, still within startup grace
+	default:
+		want = gmFreerun
+	}
+	if want == g.current {
+		return
+	}
+	// Back off between attempts so a mute ptp4l cannot stall the
+	// discipline loop with management-socket timeouts every iteration.
+	if now.Sub(g.lastAttempt) < 5*time.Second {
+		return
+	}
+	g.lastAttempt = now
+	if err := g.apply(want); err != nil {
+		log.Printf("gm-mgmt: failed to announce %s: %v (will retry)", want, err)
+		return
+	}
+	log.Printf("gm-mgmt: announcing %s", want)
+	g.current = want
+}
+
+func (g *gmMonitor) apply(state string) error {
+	gs, err := g.agent.GetGrandmasterSettings()
+	if err != nil {
+		return err
+	}
+	switch state {
+	case gmLocked:
+		gs.ClockClass = 6
+		gs.ClockAccuracy = 0x21 // within 100ns
+		gs.TimeSource = pmc.TS_GNSS
+		gs.TimeFlags |= pmc.TF_TIME_TRACEABLE | pmc.TF_FREQ_TRACEABLE | pmc.TF_UTC_OFF_VALID
+	case gmHoldover:
+		gs.ClockClass = 7 // holdover within specification
+		gs.TimeSource = pmc.TS_GNSS
+	case gmFreerun:
+		gs.ClockClass = 248
+		gs.ClockAccuracy = 0xFE // unknown
+		gs.TimeSource = pmc.TS_INTERNAL_OSCILLATOR
+		gs.TimeFlags &^= pmc.TF_TIME_TRACEABLE | pmc.TF_FREQ_TRACEABLE | pmc.TF_UTC_OFF_VALID
+	}
+	return g.agent.SetGrandmasterSettings(gs)
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -181,17 +277,27 @@ func run(cmd *cobra.Command, args []string) error {
 	clocks := []*clockState{{sink: sink, state: pmc.PS_SLAVE, isTarget: true}}
 
 	// --- PMC agent (optional) ---
+	gmMgmt := viper.GetBool("gm_mgmt")
 	var agent *pmc.Agent
-	if autoCfg {
+	if autoCfg || gmMgmt {
 		agent, err = pmc.NewAgent("/var/run/ptp4l")
 		if err != nil {
 			log.Printf("PMC agent connect failed: %v. Running without it.", err)
+			agent = nil
 		} else {
 			defer agent.Close()
 			log.Printf("Connected to ptp4l PMC agent")
-			agent.QueryDDS()
-			agent.Subscribe()
+			if autoCfg {
+				agent.QueryDDS()
+				agent.Subscribe()
+			}
 		}
+	}
+
+	var gmMon *gmMonitor
+	if gmMgmt && agent != nil {
+		gmMon = newGMMonitor(agent, viper.GetInt("gm_holdover_sec"))
+		log.Printf("gm-mgmt: managing clockClass (holdover budget %ds)", viper.GetInt("gm_holdover_sec"))
 	}
 
 	// --- Signal handling ---
@@ -216,15 +322,18 @@ func run(cmd *cobra.Command, args []string) error {
 			readyToSync, err := pps.PollSinks(sinks, 2000*time.Millisecond)
 			if err != nil {
 				log.Printf("PollSinks error: %v", err)
+				gmMon.Update(false)
 				time.Sleep(1 * time.Second)
 				continue
 			}
 			if !readyToSync {
+				gmMon.Update(false)
 				continue
 			}
 
 			sourceTs, err := source.GetPPSTime()
 			if err != nil {
+				gmMon.Update(false)
 				continue
 			}
 
@@ -236,6 +345,7 @@ func run(cmd *cobra.Command, args []string) error {
 			}
 			srcNanos := srcEdge * 1e9
 
+			lockedSample := false
 			for _, c := range clocks {
 				if !c.isTarget || !c.sink.IsAvailable {
 					continue
@@ -284,9 +394,12 @@ func run(cmd *cobra.Command, args []string) error {
 					if err := c.sink.Device.AdjFreq(-adjFrequency); err != nil {
 						log.Printf("[%s] AdjFreq error: %v", c.sink.Name, err)
 						c.sink.Servo.Reset()
+					} else if c.isTarget {
+						lockedSample = true
 					}
 				}
 			}
+			gmMon.Update(lockedSample)
 		}
 	}
 }
