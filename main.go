@@ -52,6 +52,7 @@ func init() {
 	f.BoolP("autocfg", "a", false, "enable ptp4l PMC autoconfiguration")
 	f.Int("tai-offset", 37, "TAI-UTC offset in seconds")
 	f.String("leapfile", "/usr/share/zoneinfo/leap-seconds.list", "leap seconds file (if present)")
+	f.Int("pin-index", 0, "SDP pin index carrying the GPS PPS (e.g. 0 for i210 SDP0, 2 for TimeHAT i226 SDP2)")
 
 	// Metrics flags
 	f.String("metrics-addr", ":9100", "prometheus metrics listen address")
@@ -66,9 +67,11 @@ func init() {
 		"sink", "autocfg", "tai_offset", "leapfile",
 		"metrics_addr", "metrics",
 		"step_threshold", "first_step_threshold",
+		"pin_index",
 	} {
 		_ = viper.BindPFlag(key, f.Lookup(key))
 	}
+	_ = viper.BindPFlag("pin_index", f.Lookup("pin-index"))
 	_ = viper.BindPFlag("gpsd_addr", f.Lookup("gpsd-addr"))
 	_ = viper.BindPFlag("tai_offset", f.Lookup("tai-offset"))
 	_ = viper.BindPFlag("metrics_addr", f.Lookup("metrics-addr"))
@@ -162,7 +165,7 @@ func run(cmd *cobra.Command, args []string) error {
 	defer sink.Destroy()
 
 	pinDesc := phc.PinDesc{
-		Index: 0,
+		Index: uint32(viper.GetInt("pin_index")),
 		Func:  phc.PTP_PF_EXTTS,
 		Chan:  0,
 	}
