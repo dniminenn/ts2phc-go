@@ -66,6 +66,9 @@ func init() {
 	f.Float64("step-threshold", 0.0, "step the clock when offset > this value (in seconds, 0.0 to disable)")
 	f.Float64("first-step-threshold", 0.00002, "step the clock on first update if offset > this value (in seconds)")
 
+	// Receiver quantization-error (sawtooth) correction via UBX-TIM-TP
+	f.Int("qerr-sign", 1, "apply TIM-TP qErr to each pulse: 1 add, -1 subtract, 0 log only")
+
 	for _, key := range []string{
 		"gpsd_addr",
 		"sink", "autocfg", "tai_offset", "leapfile",
@@ -75,6 +78,7 @@ func init() {
 	} {
 		_ = viper.BindPFlag(key, f.Lookup(key))
 	}
+	_ = viper.BindPFlag("qerr_sign", f.Lookup("qerr-sign"))
 	_ = viper.BindPFlag("pin_index", f.Lookup("pin-index"))
 	_ = viper.BindPFlag("gm_mgmt", f.Lookup("gm-mgmt"))
 	_ = viper.BindPFlag("gm_holdover_sec", f.Lookup("gm-holdover-sec"))
@@ -252,6 +256,21 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
+	// --- qErr source (receiver sawtooth correction, UBX-TIM-TP over gpsd raw) ---
+	qerrSign := viper.GetInt("qerr_sign")
+	qerrSrc := pps.NewQErrSource(gpsdAddr, taiOffset)
+	if met != nil {
+		qerrSrc.OnTimTP = met.UpdateTimTP
+	}
+	go func() {
+		for {
+			if err := qerrSrc.Run(); err != nil {
+				log.Printf("qerr: %v", err)
+			}
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
 	// --- PPS sink ---
 	polarity := uint32(phc.PTP_RISING_EDGE | phc.PTP_FALLING_EDGE)
 	sink, err := pps.NewSink(ptpSink, 0, polarity, stepThresh, firstStepThresh)
@@ -354,6 +373,15 @@ func run(cmd *cobra.Command, args []string) error {
 
 				sinkNanos := c.sink.LastValidTS.Unix()*1e9 + int64(c.sink.LastValidTS.Nanosecond())
 				offset := sinkNanos - srcNanos
+
+				// Receiver sawtooth: shift the measurement by this pulse's
+				// reported quantization error (matched by UTC second; sign
+				// convention verified empirically at 4.1 sigma on an M8N,
+				// see bbs-pps-pru). ±ns-scale on an M9N.
+				qerrNs, qerrOK := qerrSrc.Lookup(srcEdge - int64(taiOffset))
+				if qerrOK && qerrSign != 0 {
+					offset += int64(float64(qerrSign) * math.Round(qerrNs))
+				}
 
 				if c.sink.Servo.IsLocked() && math.Abs(float64(offset)) > outlierThresholdNS {
 					c.outlierCount++
