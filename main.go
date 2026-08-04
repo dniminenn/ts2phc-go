@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -60,6 +61,7 @@ func init() {
 
 	// Metrics flags
 	f.String("metrics-addr", ":9100", "prometheus metrics listen address")
+	f.String("textfile-dir", "", "directory of *.prom files to merge into /metrics")
 	f.Bool("metrics", true, "enable Prometheus metrics server")
 
 	// Servo flags
@@ -72,7 +74,7 @@ func init() {
 	for _, key := range []string{
 		"gpsd_addr",
 		"sink", "autocfg", "tai_offset", "leapfile",
-		"metrics_addr", "metrics",
+		"metrics_addr", "metrics", "textfile_dir",
 		"step_threshold", "first_step_threshold",
 		"pin_index", "gm_mgmt", "gm_holdover_sec",
 	} {
@@ -85,6 +87,7 @@ func init() {
 	_ = viper.BindPFlag("gpsd_addr", f.Lookup("gpsd-addr"))
 	_ = viper.BindPFlag("tai_offset", f.Lookup("tai-offset"))
 	_ = viper.BindPFlag("metrics_addr", f.Lookup("metrics-addr"))
+	_ = viper.BindPFlag("textfile_dir", f.Lookup("textfile-dir"))
 	_ = viper.BindPFlag("step_threshold", f.Lookup("step-threshold"))
 	_ = viper.BindPFlag("first_step_threshold", f.Lookup("first-step-threshold"))
 }
@@ -207,6 +210,41 @@ func (g *gmMonitor) apply(state string) error {
 	return g.agent.SetGrandmasterSettings(gs)
 }
 
+// withTextfiles appends *.prom files to the exporter output, so a servo that
+// lives outside this process (a PRU or MCU disciplining its own hardware
+// counter) can publish ts2phc_* series without a second exporter.
+func withTextfiles(h http.Handler, dir string) http.Handler {
+	if dir == "" {
+		return h
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// promhttp compresses when the scraper offers gzip, and appending plain
+		// text after a gzip stream corrupts the body. Serve uncompressed so the
+		// two halves concatenate.
+		r.Header.Del("Accept-Encoding")
+		h.ServeHTTP(w, r)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			log.Printf("textfile dir %s: %v", dir, err)
+			return
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".prom") {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				log.Printf("textfile %s: %v", e.Name(), err)
+				continue
+			}
+			_, _ = w.Write(b)
+			if len(b) > 0 && b[len(b)-1] != '\n' {
+				_, _ = w.Write([]byte("\n"))
+			}
+		}
+	})
+}
+
 func run(cmd *cobra.Command, args []string) error {
 	gpsdAddr := viper.GetString("gpsd_addr")
 	ptpSink := viper.GetString("sink")
@@ -214,6 +252,7 @@ func run(cmd *cobra.Command, args []string) error {
 	taiOffset := viper.GetInt("tai_offset")
 	leapfile := viper.GetString("leapfile")
 	metricsAddr := viper.GetString("metrics_addr")
+	textfileDir := viper.GetString("textfile_dir")
 	enableMetrics := viper.GetBool("metrics")
 	stepThresh := viper.GetFloat64("step_threshold") * 1e9
 	firstStepThresh := viper.GetFloat64("first_step_threshold") * 1e9
@@ -234,7 +273,7 @@ func run(cmd *cobra.Command, args []string) error {
 	if enableMetrics {
 		reg := prometheus.NewRegistry()
 		met = metrics.New(reg)
-		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+		http.Handle("/metrics", withTextfiles(promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), textfileDir))
 		go func() {
 			log.Printf("metrics: listening on %s", metricsAddr)
 			if err := http.ListenAndServe(metricsAddr, nil); err != nil {
@@ -280,7 +319,6 @@ func run(cmd *cobra.Command, args []string) error {
 		log.Printf("shutting down")
 		return nil
 	}
-
 
 	// --- PPS sink ---
 	polarity := uint32(phc.PTP_RISING_EDGE | phc.PTP_FALLING_EDGE)
