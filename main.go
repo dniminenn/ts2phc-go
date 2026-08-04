@@ -48,7 +48,7 @@ func init() {
 	f.String("gpsd-addr", "localhost:2947", "gpsd JSON stream address")
 
 	// PTP sink flags
-	f.StringP("sink", "c", "/dev/ptp0", "PHC device to discipline")
+	f.StringP("sink", "c", "/dev/ptp0", "PHC device to discipline (\"none\" for metrics-only)")
 	f.BoolP("autocfg", "a", false, "enable ptp4l PMC autoconfiguration")
 	f.Int("tai-offset", 37, "TAI-UTC offset in seconds")
 	f.String("leapfile", "/usr/share/zoneinfo/leap-seconds.list", "leap seconds file (if present)")
@@ -270,6 +270,17 @@ func run(cmd *cobra.Command, args []string) error {
 			time.Sleep(5 * time.Second)
 		}
 	}()
+
+	// --- Exporter-only mode ---
+	if ptpSink == "none" {
+		log.Printf("exporter mode: serving metrics only, no PHC sink")
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		log.Printf("shutting down")
+		return nil
+	}
+
 
 	// --- PPS sink ---
 	polarity := uint32(phc.PTP_RISING_EDGE | phc.PTP_FALLING_EDGE)
