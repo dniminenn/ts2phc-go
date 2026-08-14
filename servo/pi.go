@@ -4,12 +4,12 @@
 // project's ts2phc utility (linuxptp), and is therefore a derivative work.
 // It is based on the original implementation by:
 //
-//   Linux PTP project (linuxptp),
+//	Linux PTP project (linuxptp),
+//
 // Copyright (C) 2011 Richard Cochran.
 //
 // This file is licensed under the terms of the GNU General Public License,
 // version 2 or (at your option) any later version (GPL-2.0-or-later).
-//
 package servo
 
 import (
@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	HWTS_KP_SCALE = 0.7
-	HWTS_KI_SCALE = 0.3
+	HWTS_KP_SCALE   = 0.7
+	HWTS_KI_SCALE   = 0.3
 	FREQ_EST_MARGIN = 0.001
 
 	DEFAULT_KP_EXPONENT = -0.3
@@ -65,6 +65,7 @@ type PiServo struct {
 	maxFrequency    float64
 	stepThreshold   float64
 	firstStepThresh float64
+	discontinuity   float64
 	firstUpdate     bool
 
 	offsetThreshold  int64
@@ -82,9 +83,12 @@ type PiServoConfig struct {
 
 	StepThreshold   float64
 	FirstStepThresh float64
+	// Discontinuity is an offset magnitude (ns) above which the servo assumes
+	// the clock was reset underneath it rather than that it has drifted.
+	Discontinuity float64
 
-	OffsetThreshold  int64
-	NumOffsetValues  int
+	OffsetThreshold int64
+	NumOffsetValues int
 }
 
 func DefaultPiServoConfig() PiServoConfig {
@@ -111,6 +115,7 @@ func NewPiServo(fadj float64, maxPpb float64, cfg PiServoConfig) *PiServo {
 		maxFrequency:     maxPpb,
 		stepThreshold:    cfg.StepThreshold,
 		firstStepThresh:  cfg.FirstStepThresh,
+		discontinuity:    cfg.Discontinuity,
 		firstUpdate:      true,
 		offsetThreshold:  cfg.OffsetThreshold,
 		numOffsetValues:  cfg.NumOffsetValues,
@@ -169,6 +174,23 @@ func (s *PiServo) Sample(offset int64, localTs uint64, weight float64) (float64,
 
 	case 2:
 		absOff := math.Abs(float64(offset))
+		// An offset this large is not servo error, it is the clock having been
+		// reset underneath us. A NIC link renegotiation resets the PHC on igb,
+		// and any cable bump, switch reboot or autoneg glitch will do it.
+		//
+		// Without this the servo is trapped: step_threshold defaults to 0, so
+		// the check below never fires once locked, and firstStepThresh applies
+		// only to the very first update. The servo then slews forever against a
+		// discontinuity it can never close, while reporting a healthy
+		// sub-microsecond offset -- which is exactly how a box ends up serving
+		// time 37 seconds wrong with every indicator green.
+		//
+		// Reset() re-arms firstUpdate, so the next sample takes the first-step
+		// path and steps the clock back into range.
+		if s.discontinuity > 0 && absOff > s.discontinuity {
+			s.Reset()
+			break
+		}
 		if s.stepThreshold > 0 && s.stepThreshold < absOff {
 			s.count = 0
 			break

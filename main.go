@@ -67,6 +67,7 @@ func init() {
 	// Servo flags
 	f.Float64("step-threshold", 0.0, "step the clock when offset > this value (in seconds, 0.0 to disable)")
 	f.Float64("first-step-threshold", 0.00002, "step the clock on first update if offset > this value (in seconds)")
+	f.Float64("discontinuity-threshold", 1.0, "step the clock at any time if offset exceeds this (in seconds, 0 to disable). Guards against the PHC being reset underneath a running servo, e.g. by a NIC link renegotiation, which slewing can never recover from.")
 
 	// Receiver quantization-error (sawtooth) correction via UBX-TIM-TP
 	f.Int("qerr-sign", 1, "apply TIM-TP qErr to each pulse: 1 add, -1 subtract, 0 log only")
@@ -75,7 +76,7 @@ func init() {
 		"gpsd_addr",
 		"sink", "autocfg", "tai_offset", "leapfile",
 		"metrics_addr", "metrics", "textfile_dir",
-		"step_threshold", "first_step_threshold",
+		"step_threshold", "first_step_threshold", "discontinuity_threshold",
 		"pin_index", "gm_mgmt", "gm_holdover_sec",
 	} {
 		_ = viper.BindPFlag(key, f.Lookup(key))
@@ -90,6 +91,7 @@ func init() {
 	_ = viper.BindPFlag("textfile_dir", f.Lookup("textfile-dir"))
 	_ = viper.BindPFlag("step_threshold", f.Lookup("step-threshold"))
 	_ = viper.BindPFlag("first_step_threshold", f.Lookup("first-step-threshold"))
+	_ = viper.BindPFlag("discontinuity_threshold", f.Lookup("discontinuity-threshold"))
 }
 
 func initConfig() {
@@ -256,6 +258,7 @@ func run(cmd *cobra.Command, args []string) error {
 	enableMetrics := viper.GetBool("metrics")
 	stepThresh := viper.GetFloat64("step_threshold") * 1e9
 	firstStepThresh := viper.GetFloat64("first_step_threshold") * 1e9
+	discontinuity := viper.GetFloat64("discontinuity_threshold") * 1e9
 
 	if !cmd.Flags().Lookup("tai-offset").Changed && leapfile != "" {
 		if v, err := loadTAIOffset(leapfile); err == nil {
@@ -322,7 +325,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// --- PPS sink ---
 	polarity := uint32(phc.PTP_RISING_EDGE | phc.PTP_FALLING_EDGE)
-	sink, err := pps.NewSink(ptpSink, 0, polarity, stepThresh, firstStepThresh)
+	sink, err := pps.NewSink(ptpSink, 0, polarity, stepThresh, firstStepThresh, discontinuity)
 	if err != nil {
 		return fmt.Errorf("open PPS sink: %w", err)
 	}

@@ -43,7 +43,7 @@ type Sink struct {
 	Servo servo.Servo
 }
 
-func NewSink(name string, chanIdx uint32, polarity uint32, stepThresh, firstStepThresh float64) (*Sink, error) {
+func NewSink(name string, chanIdx uint32, polarity uint32, stepThresh, firstStepThresh, discontinuity float64) (*Sink, error) {
 	dev, err := phc.Open(name)
 	if err != nil {
 		return nil, err
@@ -63,6 +63,7 @@ func NewSink(name string, chanIdx uint32, polarity uint32, stepThresh, firstStep
 	cfg := servo.DefaultPiServoConfig()
 	cfg.StepThreshold = stepThresh
 	cfg.FirstStepThresh = firstStepThresh
+	cfg.Discontinuity = discontinuity
 	s := servo.NewPiServo(-fadj, float64(caps.MaxAdj), cfg)
 
 	return &Sink{
