@@ -287,7 +287,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	// --- gpsd source ---
-	adapter := &pps.GpsdMetricsAdapter{Metrics: met}
+	adapter := &pps.GpsdMetricsAdapter{Metrics: met, TAIOffset: taiOffset}
 	source := pps.NewGpsdSource(gpsdAddr, taiOffset, adapter)
 
 	go func() {
@@ -383,6 +383,7 @@ func run(cmd *cobra.Command, args []string) error {
 	// See the guard package comment for the incidents that put it here.
 	gcfg := guard.DefaultConfig()
 	gd := guard.New(gcfg, time.Now())
+	var lastUnverifiedLog time.Time
 
 	// --- PPS discipline loop ---
 	for {
@@ -406,12 +407,32 @@ func run(cmd *cobra.Command, args []string) error {
 			phcNow, phcErr := sink.Device.GetTime()
 			taiNow, taiOK := source.TAINow()
 			action, gerr := gd.Check(now, phcNow, phcErr == nil, taiNow, taiOK)
+			refValid := phcErr == nil && taiOK
 			if met != nil {
 				// A missing reference is not agreement: without two live
-				// readings the timescale is unverified, and the metric says so.
-				ok := phcErr == nil && taiOK &&
-					gerr > -gcfg.AbsThreshold && gerr < gcfg.AbsThreshold
-				met.UpdateGuard(gerr.Seconds(), ok, gd.PulseAge(now).Seconds())
+				// readings the timescale is unverified -- ok is false and
+				// the error series shows a gap (NaN), never a healthy zero.
+				errVal := math.NaN()
+				ok := false
+				if refValid {
+					errVal = gerr.Seconds()
+					threshold := gcfg.UncalThreshold
+					if gd.Calibrated() {
+						threshold = gcfg.AbsThreshold
+					}
+					ok = gerr > -threshold && gerr < threshold
+				}
+				met.UpdateGuard(errVal, ok, gd.PulseAge(now).Seconds())
+				met.UpdateGuardBias(gd.Bias().Seconds())
+			}
+			if !refValid {
+				if lastUnverifiedLog.IsZero() || now.Sub(lastUnverifiedLog) > time.Minute {
+					lastUnverifiedLog = now
+					log.Printf("[%s] GUARD: timescale unverified (phc read ok=%v, tai reference ok=%v)",
+						sink.Name, phcErr == nil, taiOK)
+				}
+			} else {
+				lastUnverifiedLog = time.Time{}
 			}
 			switch action {
 			case guard.Rearm:
@@ -430,14 +451,26 @@ func run(cmd *cobra.Command, args []string) error {
 				if serr := sink.Device.StepTime(step.Nanoseconds()); serr != nil {
 					log.Printf("[%s] GUARD: corrective step failed: %v", sink.Name, serr)
 				} else {
+					// A sample latched before the step (IsAvailable, or an
+					// event still in the EXTTS FIFO) carries a pre-step
+					// timestamp; fed to the freshly reset servo it would
+					// slam the drift estimate across the discontinuity.
 					sink.Servo.Reset()
 					for _, c := range clocks {
 						c.outlierCount = 0
+						c.sink.IsAvailable = false
 					}
+					if derr := sink.Device.DrainExtts(); derr != nil {
+						log.Printf("[%s] GUARD: post-step drain failed: %v", sink.Name, derr)
+					}
+					readyToSync = false
 					if met != nil {
 						met.IncGuardStep()
 					}
 				}
+			case guard.Refuse:
+				log.Printf("[%s] GUARD: PHC is %v from GPS TAI but the correction is untrustworthy (not near a whole second, or beyond the step bound); REFUSING to step -- the reference is suspect, intervene",
+					sink.Name, gerr.Round(time.Millisecond))
 			}
 
 			if err != nil {
@@ -457,12 +490,10 @@ func run(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
-			var srcEdge int64
-			if sourceTs.Nanosecond() > 500000000 {
-				srcEdge = sourceTs.Unix() + 1
-			} else {
-				srcEdge = sourceTs.Unix()
-			}
+			// sourceTs is a whole second by construction (processTPV rounds
+			// the fix epoch); the rounding decision was made there, where
+			// the fractional information still existed.
+			srcEdge := sourceTs.Unix()
 			srcNanos := srcEdge * 1e9
 
 			lockedSample := false
@@ -528,10 +559,20 @@ func run(cmd *cobra.Command, args []string) error {
 					}
 				}
 			}
+			// A locked sample means the PHC sits within the outlier gate of
+			// pulse-truth, so the guard's raw error on this tick is a direct
+			// observation of its reference bias.
+			if lockedSample && refValid {
+				gd.Calibrate(phcNow.Sub(taiNow))
+			}
 			gmMon.Update(lockedSample)
 		}
 	}
 }
+
+// ntpEpochOffset converts Unix seconds to the NTP-era seconds used by
+// leap-seconds.list timestamps.
+const ntpEpochOffset = 2208988800
 
 func loadTAIOffset(path string) (int, error) {
 	f, err := os.Open(path)
@@ -540,17 +581,40 @@ func loadTAIOffset(path string) (int, error) {
 	}
 	defer f.Close()
 
+	// The file lists entries with their EFFECTIVE date. When IERS announces
+	// a leap, distros ship the future-effective entry months early; taking
+	// the last line unconditionally would apply next year's offset today --
+	// a deterministic one-second wrong-step armed at every announcement.
+	// Only an entry whose timestamp has passed counts. The system clock is
+	// trusted here only to month granularity, which survives any clock
+	// error this daemon could plausibly be running under.
+	nowNTP := time.Now().Unix() + ntpEpochOffset
+
 	sc := bufio.NewScanner(f)
 	var last int
 	var found bool
 
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
+		if strings.HasPrefix(line, "#@") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				if exp, err := strconv.ParseInt(fields[1], 10, 64); err == nil && exp < nowNTP {
+					log.Printf("leapfile %s EXPIRED (validity ended %v); offset may be stale, update the file",
+						path, time.Unix(exp-ntpEpochOffset, 0).UTC().Format("2006-01-02"))
+				}
+			}
+			continue
+		}
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
+			continue
+		}
+		eff, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil || eff > nowNTP {
 			continue
 		}
 		v, err := strconv.Atoi(fields[1])
@@ -564,7 +628,7 @@ func loadTAIOffset(path string) (int, error) {
 		return 0, err
 	}
 	if !found {
-		return 0, fmt.Errorf("no leap entries in %s", path)
+		return 0, fmt.Errorf("no effective leap entries in %s", path)
 	}
 	return last, nil
 }

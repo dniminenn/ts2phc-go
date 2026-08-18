@@ -22,6 +22,11 @@ type Sink struct {
 	Device   *phc.Device
 	Channel  uint32
 	Polarity uint32
+	// origPolarity is what the caller asked for. Arm() may degrade
+	// Polarity to a single edge on a transient failure; every Rearm
+	// retries from the original request so one bad moment during an
+	// adapter reset cannot ratchet the sink into a degraded mode forever.
+	origPolarity uint32
 
 	// Dynamic Edge Filtering State
 	state       FilterState
@@ -67,13 +72,14 @@ func NewSink(name string, chanIdx uint32, polarity uint32, stepThresh, firstStep
 	s := servo.NewPiServo(-fadj, float64(caps.MaxAdj), cfg)
 
 	return &Sink{
-		Name:        name,
-		Device:      dev,
-		Channel:     chanIdx,
-		Polarity:    polarity,
-		state:       FilterStateInit,
-		pulsePeriod: time.Second,
-		Servo:       s,
+		Name:         name,
+		Device:       dev,
+		Channel:      chanIdx,
+		Polarity:     polarity,
+		origPolarity: polarity,
+		state:        FilterStateInit,
+		pulsePeriod:  time.Second,
+		Servo:        s,
 	}, nil
 }
 
@@ -84,6 +90,11 @@ func (s *Sink) Arm() error {
 
 	if err := s.Device.ClearExttsMask(); err == nil {
 		s.Device.EnableExttsMaskSingle(s.Channel)
+	} else {
+		// Without the mask this fd receives every enabled EXTTS channel on
+		// the device; PollSinks then depends on its own deadline to avoid
+		// spinning on foreign events. Worth knowing at startup, not never.
+		log.Printf("[%s] channel mask unsupported (%v); relying on index filtering", s.Name, err)
 	}
 
 	if err := s.Device.DrainExtts(); err != nil {
@@ -121,9 +132,15 @@ func (s *Sink) Arm() error {
 // routing those events depend on. The edge filter is reset to re-learn the
 // pulse pattern because the stream it locked onto no longer exists.
 func (s *Sink) Rearm(pin phc.PinDesc) error {
+	// Startup tolerates SetPinFunc failure ("may already be configured",
+	// some drivers reject a redundant set); recovery must not be stricter
+	// than startup, or the exact driver that failed here would loop on a
+	// dead pipeline forever while Arm() alone might have sufficed.
 	if err := s.Device.SetPinFunc(pin); err != nil {
-		return fmt.Errorf("restore pin func: %w", err)
+		log.Printf("[%s] rearm: PTP_PIN_SETFUNC failed (may already be configured): %v", s.Name, err)
 	}
+	s.Polarity = s.origPolarity
+	s.singleEdge = false
 	if err := s.Arm(); err != nil {
 		return err
 	}

@@ -30,6 +30,11 @@ type GpsdTPV struct {
 	Track  float64 `json:"track"`
 	Climb  float64 `json:"climb"`
 	Status int     `json:"status"`
+	// Leapseconds is the receiver's broadcast GPS-UTC offset (18 as of
+	// 2017). It is the one runtime cross-check on the configured TAI
+	// offset that comes from the sky rather than a file: TAI-UTC must
+	// equal Leapseconds+19. Zero means the field was absent.
+	Leapseconds int `json:"leapseconds"`
 }
 
 // GpsdSKY is the subset of gpsd's SKY JSON we care about.
@@ -152,9 +157,11 @@ func (s *GpsdSource) processTPV(tpv *GpsdTPV) {
 	}
 
 	// TPV.time is the epoch of the current fix. The next PPS edge fires
-	// at the top of the following second. Truncate to second and add 1s,
-	// then convert UTC to TAI.
-	next := t.Truncate(time.Second).Add(time.Second)
+	// at the top of the following second. Round to the nearest second --
+	// not truncate: a driver reporting the epoch a hair below the second
+	// (x.999...) means that second, and truncation would label every
+	// pulse one second early. Then add 1s and convert UTC to TAI.
+	next := t.Round(time.Second).Add(time.Second)
 	tai := next.Add(time.Duration(s.taiOffset) * time.Second)
 
 	s.mu.Lock()

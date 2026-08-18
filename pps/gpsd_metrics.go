@@ -1,6 +1,7 @@
 package pps
 
 import (
+	"log"
 	"sync"
 	"ts2phc-go/metrics"
 	"ts2phc-go/ubx"
@@ -10,14 +11,35 @@ import (
 // into the existing metrics package via its UBX-typed Update methods.
 type GpsdMetricsAdapter struct {
 	Metrics *metrics.Metrics
+	// TAIOffset is the TAI-UTC the daemon is disciplining with. Each TPV
+	// carrying the receiver's broadcast leapseconds cross-checks it:
+	// TAI-UTC must equal leapseconds+19. A mismatch means a stale/wrong
+	// leapfile or a receiver still on its firmware-default leap count --
+	// either way the timescale is wrong by whole seconds and the guard,
+	// sharing the same offset, cannot see it. This metric is the alarm.
+	TAIOffset int
 
-	mu      sync.Mutex
-	pdop100 uint16
+	mu          sync.Mutex
+	pdop100     uint16
+	leapWarned  bool
 }
 
 func (a *GpsdMetricsAdapter) OnTPV(tpv *GpsdTPV) {
 	if a.Metrics == nil {
 		return
+	}
+
+	if tpv.Leapseconds != 0 && a.TAIOffset != 0 {
+		ok := a.TAIOffset == tpv.Leapseconds+19
+		a.Metrics.UpdateLeapConsistency(ok)
+		a.mu.Lock()
+		warn := !ok && !a.leapWarned
+		a.leapWarned = !ok
+		a.mu.Unlock()
+		if warn {
+			log.Printf("LEAP MISMATCH: configured TAI-UTC %d but receiver broadcasts leapseconds %d (implies %d); the timescale is wrong by whole seconds and the guard cannot see it",
+				a.TAIOffset, tpv.Leapseconds, tpv.Leapseconds+19)
+		}
 	}
 
 	a.mu.Lock()

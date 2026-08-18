@@ -50,6 +50,8 @@ type Metrics struct {
 
 	guardErr    prometheus.Gauge
 	guardOK     prometheus.Gauge
+	guardBias   prometheus.Gauge
+	leapOK      prometheus.Gauge
 	pulseAge    prometheus.Gauge
 	rearmTotal  prometheus.Counter
 	stepTotal   prometheus.Counter
@@ -102,6 +104,8 @@ func New(reg prometheus.Registerer) *Metrics {
 	m.guardErr = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "guard_phc_error_seconds", Help: "Direct PHC read minus GPS-derived TAI, independent of the PPS pipeline"})
 	m.guardOK = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "guard_timescale_ok", Help: "1 while |guard_phc_error_seconds| is within threshold; alert on 0"})
 	m.pulseAge = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "pps_last_pulse_age_seconds", Help: "Seconds since the last validated PPS edge; alert when it grows"})
+	m.guardBias = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "guard_reference_bias_seconds", Help: "EMA of the TAI reference's delivery-latency bias, learned while servo-locked"})
+	m.leapOK = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "leap_offset_consistent", Help: "1 while configured TAI-UTC equals receiver-broadcast leapseconds+19; alert on 0"})
 	m.rearmTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: "ts2phc", Name: "pps_rearm_total", Help: "EXTTS re-arms after pulse silence (the adapter wiped the pin config)"})
 	m.stepTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: "ts2phc", Name: "guard_step_total", Help: "Whole-second corrective steps issued by the timescale guard"})
 
@@ -112,7 +116,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.timeAcc, m.timeValid, m.clkBias, m.clkDrift, m.clkAcc, m.freqAcc,
 		m.tpQErr, m.satCno, m.satElev, m.satAzim, m.satUsed,
 		m.ts2phcOffset, m.ts2phcFreq,
-		m.guardErr, m.guardOK, m.pulseAge, m.rearmTotal, m.stepTotal,
+		m.guardErr, m.guardOK, m.guardBias, m.leapOK, m.pulseAge, m.rearmTotal, m.stepTotal,
 	)
 
 	return m
@@ -222,6 +226,16 @@ func (m *Metrics) UpdateGuard(errSeconds float64, ok bool, pulseAgeSeconds float
 
 func (m *Metrics) IncRearm()     { m.rearmTotal.Inc() }
 func (m *Metrics) IncGuardStep() { m.stepTotal.Inc() }
+
+func (m *Metrics) UpdateGuardBias(b float64) { m.guardBias.Set(b) }
+
+func (m *Metrics) UpdateLeapConsistency(ok bool) {
+	v := float64(0)
+	if ok {
+		v = 1
+	}
+	m.leapOK.Set(v)
+}
 
 func (m *Metrics) UpdateTS2PHC(clock string, offset float64, freq float64) {
 	m.ts2phcOffset.WithLabelValues(clock).Set(offset)

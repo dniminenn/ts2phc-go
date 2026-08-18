@@ -172,6 +172,151 @@ func TestGuardQuiescesAfterRecovery(t *testing.T) {
 	}
 }
 
+// calibrate feeds n identical bias observations.
+func calibrate(g *Guard, bias time.Duration, n int) {
+	for i := 0; i < n; i++ {
+		g.Calibrate(bias)
+	}
+}
+
+// TestGuardCatchesTwoSecondDisplacementOnceCalibrated replays the f1279c3
+// incident magnitude: a PHC exactly 2 s off, with a realistic 400 ms
+// reference bias eating into the raw error. The uncompensated guard is blind
+// to this band forever (raw error -1.6 s, under every sane raw threshold);
+// the calibrated guard must catch it and step exactly 2 s.
+func TestGuardCatchesTwoSecondDisplacementOnceCalibrated(t *testing.T) {
+	g := New(DefaultConfig(), t0)
+	bias := 400 * time.Millisecond
+	calibrate(g, bias, DefaultConfig().BiasSamples)
+	if !g.Calibrated() {
+		t.Fatal("not calibrated after BiasSamples observations")
+	}
+
+	var stepped time.Duration
+	for i := 0; i < 20; i++ {
+		now := t0.Add(time.Duration(i) * time.Second)
+		phc := now.Add(-2 * time.Second).Add(bias) // raw = -2s + bias
+		if a, err := g.Check(now, phc, true, now, true); a == Step {
+			stepped = StepAmount(err)
+			break
+		} else if a == Refuse {
+			t.Fatalf("tick %d: refused a clean whole-second displacement", i)
+		}
+	}
+	if stepped != 2*time.Second {
+		t.Fatalf("step = %v, want exactly +2s", stepped)
+	}
+}
+
+// TestStepSurvivesReferenceFlicker: a 37 s displacement with every third
+// reference reading invalid (gpsd reconnect churn, TPV cadence racing the
+// staleness gate). Violations must accumulate across the gaps -- a hard
+// reset on invalid ticks would let a flapping fix mask the fault forever.
+func TestStepSurvivesReferenceFlicker(t *testing.T) {
+	g := New(DefaultConfig(), t0)
+	for i := 0; i < 30; i++ {
+		now := t0.Add(time.Duration(i) * time.Second)
+		phc := now.Add(-37 * time.Second)
+		taiValid := i%3 != 2
+		if a, _ := g.Check(now, phc, true, now, taiValid); a == Step {
+			return
+		}
+	}
+	t.Fatal("flickering reference starved the guard; no step in 30 ticks")
+}
+
+// TestGlitchStormCannotBurnViolationsOnOneReference: an EXTTS glitch storm
+// ticks the loop at tens of Hz, all judging the same TPV. Five "violations"
+// inside half a second are one observation, not five; no step may fire.
+func TestGlitchStormCannotBurnViolationsOnOneReference(t *testing.T) {
+	g := New(DefaultConfig(), t0)
+	for i := 0; i < 9; i++ {
+		now := t0.Add(time.Duration(i) * 50 * time.Millisecond)
+		phc := now.Add(-37 * time.Second)
+		if a, _ := g.Check(now, phc, true, now, true); a == Step || a == Refuse {
+			t.Fatalf("tick %d (%dms in): acted on violations burned against one reference window", i, i*50)
+		}
+	}
+}
+
+// TestFractionalErrorRefusedNotStepped: sustained delivery lag makes a
+// healthy clock read +2.5 s. The error is confirmed but sits nowhere near a
+// whole second once compensated -- stepping would displace a correct clock.
+// The guard must Refuse (alarm), never Step.
+func TestFractionalErrorRefusedNotStepped(t *testing.T) {
+	g := New(DefaultConfig(), t0)
+	calibrate(g, 100*time.Millisecond, DefaultConfig().BiasSamples)
+	var refused bool
+	for i := 0; i < 20; i++ {
+		now := t0.Add(time.Duration(i) * time.Second)
+		phc := now.Add(2600 * time.Millisecond) // comp = +2.5s, frac 0.5
+		a, _ := g.Check(now, phc, true, now, true)
+		if a == Step {
+			t.Fatal("stepped a healthy clock on a fractional (lag-shaped) error")
+		}
+		if a == Refuse {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Fatal("confirmed fractional error produced no Refuse alarm")
+	}
+}
+
+// TestOversizedStepRefused: an error beyond MaxStep means the reference is
+// broken (stale estimate after suspend, replayed stream), not the clock.
+func TestOversizedStepRefused(t *testing.T) {
+	g := New(DefaultConfig(), t0)
+	var refused bool
+	for i := 0; i < 20; i++ {
+		now := t0.Add(time.Duration(i) * time.Second)
+		phc := now.Add(-3600 * time.Second)
+		a, _ := g.Check(now, phc, true, now, true)
+		if a == Step {
+			t.Fatal("stepped an hour on a reference that cannot plausibly be right")
+		}
+		if a == Refuse {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Fatal("oversized error produced no Refuse alarm")
+	}
+}
+
+// TestCalibrationRejectsImplausibleBias: a mislabeled interval (whole-second
+// wrong labels) must not poison the bias model.
+func TestCalibrationRejectsImplausibleBias(t *testing.T) {
+	g := New(DefaultConfig(), t0)
+	calibrate(g, 200*time.Millisecond, DefaultConfig().BiasSamples)
+	calibrate(g, -37*time.Second, 100) // poison attempt
+	if b := g.Bias(); b < 100*time.Millisecond || b > 300*time.Millisecond {
+		t.Fatalf("bias %v corrupted by implausible samples", b)
+	}
+}
+
+// TestDefaultConfigPinned: silently widening a threshold or the violation
+// count is a one-line change that would pass every behavioral test while
+// enlarging the blind window. Pin the numbers; changing them must be loud.
+func TestDefaultConfigPinned(t *testing.T) {
+	c := DefaultConfig()
+	want := Config{
+		PulseTimeout:     5 * time.Second,
+		AbsThreshold:     750 * time.Millisecond,
+		UncalThreshold:   2 * time.Second,
+		Violations:       5,
+		ViolationSpacing: 500 * time.Millisecond,
+		MaxStep:          500 * time.Second,
+		Ambiguity:        150 * time.Millisecond,
+		BiasAlpha:        0.05,
+		BiasSamples:      30,
+		MaxBias:          1500 * time.Millisecond,
+	}
+	if c != want {
+		t.Fatalf("DefaultConfig drifted: got %+v want %+v", c, want)
+	}
+}
+
 // TestStepAmountRoundsToWholeSeconds: the step must correct the second count
 // and leave the servo's phase alone, whatever fraction rides on the estimate.
 func TestStepAmountRoundsToWholeSeconds(t *testing.T) {

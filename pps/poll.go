@@ -27,10 +27,20 @@ func PollSinks(sinks []*Sink, timeout time.Duration) (bool, error) {
 	allSinksHaveEvents := false
 	ignoreAny := false
 
-	timeoutMs := int(timeout.Milliseconds())
+	// The deadline bounds the WHOLE call, not one unix.Poll. Without it, a
+	// stream of foreign-channel events (possible whenever the channel mask
+	// ioctl is unsupported) hits the Index!=Channel continue below without
+	// ever collecting, and each iteration would restart a full timeout:
+	// the function never returns, and the caller's guard tick -- which
+	// exists precisely for when this pipeline is broken -- never runs.
+	deadline := time.Now().Add(timeout)
 
 	for !allSinksHaveEvents {
-		n, err := unix.Poll(pollFds, timeoutMs)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false, nil
+		}
+		n, err := unix.Poll(pollFds, int(remaining.Milliseconds())+1)
 		if err != nil {
 			if err == unix.EINTR {
 				return false, nil
