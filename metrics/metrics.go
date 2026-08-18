@@ -48,6 +48,12 @@ type Metrics struct {
 	ts2phcOffset *prometheus.GaugeVec
 	ts2phcFreq   *prometheus.GaugeVec
 
+	guardErr    prometheus.Gauge
+	guardOK     prometheus.Gauge
+	pulseAge    prometheus.Gauge
+	rearmTotal  prometheus.Counter
+	stepTotal   prometheus.Counter
+
 	mu      sync.Mutex
 	satSeen map[string]struct{}
 }
@@ -93,6 +99,12 @@ func New(reg prometheus.Registerer) *Metrics {
 	m.ts2phcOffset = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "offset_ns", Help: "PTP clock offset in nanoseconds"}, clockLabel)
 	m.ts2phcFreq = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "freq_ppb", Help: "PTP clock frequency adjustment in ppb"}, clockLabel)
 
+	m.guardErr = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "guard_phc_error_seconds", Help: "Direct PHC read minus GPS-derived TAI, independent of the PPS pipeline"})
+	m.guardOK = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "guard_timescale_ok", Help: "1 while |guard_phc_error_seconds| is within threshold; alert on 0"})
+	m.pulseAge = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "ts2phc", Name: "pps_last_pulse_age_seconds", Help: "Seconds since the last validated PPS edge; alert when it grows"})
+	m.rearmTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: "ts2phc", Name: "pps_rearm_total", Help: "EXTTS re-arms after pulse silence (the adapter wiped the pin config)"})
+	m.stepTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: "ts2phc", Name: "guard_step_total", Help: "Whole-second corrective steps issued by the timescale guard"})
+
 	reg.MustRegister(
 		m.fixType, m.numSV, m.lat, m.lon, m.altMSL, m.hAcc, m.vAcc,
 		m.speed, m.heading, m.headAcc, m.velN, m.velE, m.velD,
@@ -100,6 +112,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.timeAcc, m.timeValid, m.clkBias, m.clkDrift, m.clkAcc, m.freqAcc,
 		m.tpQErr, m.satCno, m.satElev, m.satAzim, m.satUsed,
 		m.ts2phcOffset, m.ts2phcFreq,
+		m.guardErr, m.guardOK, m.pulseAge, m.rearmTotal, m.stepTotal,
 	)
 
 	return m
@@ -196,6 +209,19 @@ func (m *Metrics) UpdateNavSAT(sat *ubx.NavSAT) {
 	// gps_satellites_used to 0 instead of sticking at the last healthy value.
 	m.numSV.Set(float64(usedCount))
 }
+
+func (m *Metrics) UpdateGuard(errSeconds float64, ok bool, pulseAgeSeconds float64) {
+	m.guardErr.Set(errSeconds)
+	v := float64(0)
+	if ok {
+		v = 1
+	}
+	m.guardOK.Set(v)
+	m.pulseAge.Set(pulseAgeSeconds)
+}
+
+func (m *Metrics) IncRearm()     { m.rearmTotal.Inc() }
+func (m *Metrics) IncGuardStep() { m.stepTotal.Inc() }
 
 func (m *Metrics) UpdateTS2PHC(clock string, offset float64, freq float64) {
 	m.ts2phcOffset.WithLabelValues(clock).Set(offset)

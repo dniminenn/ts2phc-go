@@ -114,6 +114,24 @@ func (s *Sink) Arm() error {
 	return fmt.Errorf("all EXTTS arm attempts failed (both: %v, rising: %v, falling: %v)", err, err2, err3)
 }
 
+// Rearm restores the EXTTS plumbing after the adapter wiped it. An igb
+// adapter reset (link renegotiation, an EEE toggle, ethtool -r) clears both
+// the SDP pin function and the EXTTS request behind the driver's back;
+// Arm() alone re-requests events, but only the pin function restores the
+// routing those events depend on. The edge filter is reset to re-learn the
+// pulse pattern because the stream it locked onto no longer exists.
+func (s *Sink) Rearm(pin phc.PinDesc) error {
+	if err := s.Device.SetPinFunc(pin); err != nil {
+		return fmt.Errorf("restore pin func: %w", err)
+	}
+	if err := s.Arm(); err != nil {
+		return err
+	}
+	s.state = FilterStateInit
+	s.IsAvailable = false
+	return nil
+}
+
 func (s *Sink) Destroy() {
 	s.Device.DisableExtts(s.Channel)
 	s.Device.Close()

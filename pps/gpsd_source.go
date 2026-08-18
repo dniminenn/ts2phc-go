@@ -185,5 +185,26 @@ func (s *GpsdSource) GetPPSTime() (time.Time, error) {
 	return tai, nil
 }
 
+// TAINow estimates current TAI from the last TPV, independent of every clock
+// this daemon disciplines -- which is the point: it is the guard's reference
+// when the PHC, the system clock, or the PPS pipeline cannot be trusted.
+// tpTAI labels the pulse AFTER the fix epoch, so at receive time true TAI was
+// tpTAI minus one second plus gpsd's delivery latency within that second.
+// The estimate is therefore biased low by that latency -- hundreds of
+// milliseconds at worst, never a whole second -- and the elapsed term rides
+// on Go's monotonic clock, immune to any system clock step.
+func (s *GpsdSource) TAINow() (time.Time, bool) {
+	s.mu.Lock()
+	tai := s.tpTAI
+	rx := s.tpRxTime
+	valid := s.tpValid
+	s.mu.Unlock()
+
+	if !valid || time.Since(rx) > maxTPAge {
+		return time.Time{}, false
+	}
+	return tai.Add(time.Since(rx) - time.Second), true
+}
+
 func (s *GpsdSource) GetClock() *phc.Device { return nil }
 func (s *GpsdSource) Destroy()              {}

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"ts2phc-go/guard"
 	"ts2phc-go/metrics"
 	"ts2phc-go/phc"
 	"ts2phc-go/pmc"
@@ -377,6 +378,12 @@ func run(cmd *cobra.Command, args []string) error {
 
 	log.Printf("entering main loop")
 
+	// The guard runs on every tick whether or not the PPS pipeline produced
+	// anything -- it exists precisely for the ticks when nothing else does.
+	// See the guard package comment for the incidents that put it here.
+	gcfg := guard.DefaultConfig()
+	gd := guard.New(gcfg, time.Now())
+
 	// --- PPS discipline loop ---
 	for {
 		select {
@@ -391,6 +398,48 @@ func run(cmd *cobra.Command, args []string) error {
 			}
 
 			readyToSync, err := pps.PollSinks(sinks, 2000*time.Millisecond)
+
+			now := time.Now()
+			if readyToSync {
+				gd.Pulse(now)
+			}
+			phcNow, phcErr := sink.Device.GetTime()
+			taiNow, taiOK := source.TAINow()
+			action, gerr := gd.Check(now, phcNow, phcErr == nil, taiNow, taiOK)
+			if met != nil {
+				// A missing reference is not agreement: without two live
+				// readings the timescale is unverified, and the metric says so.
+				ok := phcErr == nil && taiOK &&
+					gerr > -gcfg.AbsThreshold && gerr < gcfg.AbsThreshold
+				met.UpdateGuard(gerr.Seconds(), ok, gd.PulseAge(now).Seconds())
+			}
+			switch action {
+			case guard.Rearm:
+				log.Printf("[%s] GUARD: no validated PPS for %v, re-arming EXTTS (adapter reset wipes the pin config)",
+					sink.Name, gd.PulseAge(now).Round(time.Second))
+				if rerr := sink.Rearm(pinDesc); rerr != nil {
+					log.Printf("[%s] GUARD: re-arm failed: %v (will retry)", sink.Name, rerr)
+				}
+				if met != nil {
+					met.IncRearm()
+				}
+			case guard.Step:
+				step := guard.StepAmount(gerr)
+				log.Printf("[%s] GUARD: PHC is %v from GPS TAI with the pipeline unable to correct it; stepping %v",
+					sink.Name, gerr.Round(time.Millisecond), step)
+				if serr := sink.Device.StepTime(step.Nanoseconds()); serr != nil {
+					log.Printf("[%s] GUARD: corrective step failed: %v", sink.Name, serr)
+				} else {
+					sink.Servo.Reset()
+					for _, c := range clocks {
+						c.outlierCount = 0
+					}
+					if met != nil {
+						met.IncGuardStep()
+					}
+				}
+			}
+
 			if err != nil {
 				log.Printf("PollSinks error: %v", err)
 				gmMon.Update(false)
