@@ -66,6 +66,7 @@ type PiServo struct {
 	stepThreshold   float64
 	firstStepThresh float64
 	discontinuity   float64
+	plausibleFreq   float64
 	firstUpdate     bool
 
 	offsetThreshold  int64
@@ -86,6 +87,15 @@ type PiServoConfig struct {
 	// Discontinuity is an offset magnitude (ns) above which the servo assumes
 	// the clock was reset underneath it rather than that it has drifted.
 	Discontinuity float64
+	// PlausibleFreq (ppb) bounds the two-sample drift estimate. The outlier
+	// gate only protects a locked servo; while unlocked, a mislabeled
+	// sample pair (a one-second label race during relock) implies a drift
+	// of ~5e8 ppb, which the maxFrequency clamp turns into a full-rate slew
+	// -- the clock then physically travels a second-scale excursion before
+	// anything recovers. No real crystal is beyond a few hundred ppm; an
+	// estimate outside this bound is a bad pair, to be discarded, not
+	// slewed. 0 disables.
+	PlausibleFreq float64
 
 	OffsetThreshold int64
 	NumOffsetValues int
@@ -96,9 +106,10 @@ func DefaultPiServoConfig() PiServoConfig {
 		KpScale:    HWTS_KP_SCALE,
 		KpExponent: DEFAULT_KP_EXPONENT,
 		KpNormMax:  DEFAULT_KP_NORM_MAX,
-		KiScale:    HWTS_KI_SCALE,
-		KiExponent: DEFAULT_KI_EXPONENT,
-		KiNormMax:  DEFAULT_KI_NORM_MAX,
+		KiScale:       HWTS_KI_SCALE,
+		KiExponent:    DEFAULT_KI_EXPONENT,
+		KiNormMax:     DEFAULT_KI_NORM_MAX,
+		PlausibleFreq: 200000, // +/-200 ppm: generous for any real crystal
 	}
 }
 
@@ -116,6 +127,7 @@ func NewPiServo(fadj float64, maxPpb float64, cfg PiServoConfig) *PiServo {
 		stepThreshold:    cfg.StepThreshold,
 		firstStepThresh:  cfg.FirstStepThresh,
 		discontinuity:    cfg.Discontinuity,
+		plausibleFreq:    cfg.PlausibleFreq,
 		firstUpdate:      true,
 		offsetThreshold:  cfg.OffsetThreshold,
 		numOffsetValues:  cfg.NumOffsetValues,
@@ -153,7 +165,16 @@ func (s *PiServo) Sample(offset int64, localTs uint64, weight float64) (float64,
 			break
 		}
 
-		s.drift += (1e9 - s.drift) * float64(s.offset[1]-s.offset[0]) / float64(s.local[1]-s.local[0])
+		est := s.drift + (1e9-s.drift)*float64(s.offset[1]-s.offset[0])/float64(s.local[1]-s.local[0])
+		if s.plausibleFreq > 0 && (est > s.plausibleFreq || est < -s.plausibleFreq) {
+			// One of the two samples is garbage (a mislabeled second during
+			// relock). Discard the pair and estimate again from scratch;
+			// slewing at an impossible rate is how a one-second label race
+			// becomes a one-second physical excursion.
+			s.count = 0
+			break
+		}
+		s.drift = est
 
 		if s.drift < -s.maxFrequency {
 			s.drift = -s.maxFrequency

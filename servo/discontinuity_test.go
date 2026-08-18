@@ -101,3 +101,47 @@ func TestWithoutGuardServoStaysTrapped(t *testing.T) {
 	}
 	// Trapped: locked, unable to step, slewing against 37 s forever.
 }
+
+// TestMislabeledPairCannotSlamDrift replays the relock transient observed
+// live on 2026-08-18 after a guard step: an unlocked servo consumed a sample
+// pair whose second member carried a one-second label error, estimated a
+// drift of ~5e8 ppb, clamped it to maxFrequency, and physically slewed the
+// PHC over a second off before recovering. The estimator must discard an
+// implausible pair and re-estimate, never slew at a rate no crystal can be
+// wrong by.
+func TestMislabeledPairCannotSlamDrift(t *testing.T) {
+	cfg := DefaultPiServoConfig()
+	s := NewPiServo(0, 62.5e6, cfg) // i210-class max adj
+	s.SyncInterval(1.0)
+
+	// Sample 1 sane, sample 2 mislabeled by +1s, ~2s apart.
+	s.Sample(100, 2000*uint64(1e9), 1.0)
+	ppb, _ := s.Sample(1e9+150, 2002*uint64(1e9), 1.0)
+	if ppb > cfg.PlausibleFreq || ppb < -cfg.PlausibleFreq {
+		t.Fatalf("mislabeled pair produced %v ppb; the slam is back", ppb)
+	}
+	if s.IsLocked() {
+		t.Fatal("servo locked onto a garbage pair")
+	}
+
+	// Clean pairs afterwards must still converge to a lock.
+	for i := 0; i < 8; i++ {
+		s.Sample(int64(200+i), uint64(2004+i*2)*uint64(1e9), 1.0)
+	}
+	if !s.IsLocked() {
+		t.Fatal("servo failed to lock from clean samples after discarding the pair")
+	}
+}
+
+// TestPlausibleLargeCrystalStillEstimates: a genuinely bad-but-real crystal
+// (150 ppm) must not be mistaken for a garbage pair.
+func TestPlausibleLargeCrystalStillEstimates(t *testing.T) {
+	s := NewPiServo(0, 62.5e6, DefaultPiServoConfig())
+	s.SyncInterval(1.0)
+	// 150 ppm: offset grows 300us per 2s.
+	s.Sample(0, 2000*uint64(1e9), 1.0)
+	s.Sample(300000, 2002*uint64(1e9), 1.0)
+	if !s.IsLocked() {
+		t.Fatal("a plausible 150 ppm pair was discarded")
+	}
+}
